@@ -15,6 +15,135 @@ const initialSettings = {
   maintainAspectRatio: true,
 };
 
+const ALLOWED_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"];
+const ALLOWED_MIME_TYPES = [
+  "image/png",
+  "image/x-png",
+  "image/jpeg",
+  "image/jpg",
+  "image/pjpeg",
+  "image/jfif",
+  "image/webp",
+  "image/bmp",
+  "image/x-ms-bmp",
+  "image/tiff",
+  "image/tif",
+];
+
+function getAspectRatioLabel(width, height) {
+  if (!width || !height) return "—";
+  const ratio = width / height;
+  if (Math.abs(ratio - 1) < 0.02) return "1:1 (Square)";
+  if (Math.abs(ratio - 16 / 9) < 0.03) return "16:9 (Landscape)";
+  if (Math.abs(ratio - 9 / 16) < 0.03) return "9:16 (Portrait)";
+  if (Math.abs(ratio - 4 / 3) < 0.03) return "4:3 (Standard)";
+  if (Math.abs(ratio - 3 / 4) < 0.03) return "3:4 (Portrait)";
+  if (Math.abs(ratio - 3 / 2) < 0.03) return "3:2 (Photo)";
+  if (Math.abs(ratio - 2 / 3) < 0.03) return "2:3 (Photo Portrait)";
+  return `${ratio.toFixed(2)}:1`;
+}
+
+function ImageComparisonSlider({
+  originalSrc,
+  processedSrc,
+  originalDimensions,
+  processedDimensions,
+}) {
+  const [sliderPos, setSliderPos] = useState(50);
+  const [isDragging, setIsDragging] = useState(false);
+  const containerRef = useRef(null);
+
+  const updatePosition = useCallback((clientX) => {
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const x = clientX - rect.left;
+    const pos = Math.max(0, Math.min(100, (x / rect.width) * 100));
+    setSliderPos(pos);
+  }, []);
+
+  const handlePointerDown = (e) => {
+    setIsDragging(true);
+    e.currentTarget.setPointerCapture(e.pointerId);
+    updatePosition(e.clientX);
+  };
+
+  const handlePointerMove = (e) => {
+    if (!isDragging) return;
+    updatePosition(e.clientX);
+  };
+
+  const handlePointerUp = (e) => {
+    if (isDragging) {
+      setIsDragging(false);
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch (err) {}
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      setSliderPos((p) => Math.max(0, p - 5));
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      setSliderPos((p) => Math.min(100, p + 5));
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      setSliderPos(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      setSliderPos(100);
+    }
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      className="comparison-container"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      role="slider"
+      aria-label="Before and after image comparison slider. Use left and right arrow keys to adjust split position."
+      aria-valuenow={Math.round(sliderPos)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+    >
+      {/* Background layer: Original image (revealed on the left) */}
+      <div className="comparison-layer comparison-original">
+        <img src={originalSrc} alt="Original input image" draggable={false} />
+        <span className="comparison-badge badge-original">
+          ORIGINAL {originalDimensions?.width ? `(${originalDimensions.width} × ${originalDimensions.height} px)` : ""}
+        </span>
+      </div>
+
+      {/* Foreground layer: Processed image (revealed on the right) */}
+      <div
+        className="comparison-layer comparison-processed"
+        style={{ clipPath: `inset(0 0 0 ${sliderPos}%)` }}
+      >
+        <img src={processedSrc} alt="Processed resampled output image" draggable={false} />
+        <span className="comparison-badge badge-processed">
+          PROCESSED {processedDimensions?.width ? `(${processedDimensions.width} × ${processedDimensions.height} px)` : ""}
+        </span>
+      </div>
+
+      {/* Interactive Divider Line and Center Grab Handle */}
+      <div className="comparison-divider" style={{ left: `${sliderPos}%` }}>
+        <div className="comparison-handle" aria-hidden="true">
+          <span>‹</span>
+          <span>›</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
@@ -24,7 +153,9 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [previewMode, setPreviewMode] = useState("slider"); // "slider" | "processed" | "original"
   const inputRef = useRef(null);
+  const loadCounterRef = useRef(0);
 
   // Sizing mode & Print size calculator state
   const [sizingMode, setSizingMode] = useState("factor"); // "factor" | "print"
@@ -90,16 +221,51 @@ function App() {
     setError("");
   }
 
+  function handleRemoveImage() {
+    loadCounterRef.current++;
+    setFile(null);
+    setResult(null);
+    setDimensions({ width: 0, height: 0 });
+    setPreview((old) => {
+      if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+      return "";
+    });
+    setError("");
+    if (inputRef.current) inputRef.current.value = "";
+  }
+
+  function handleReplaceImage() {
+    if (inputRef.current) {
+      inputRef.current.value = "";
+      inputRef.current.click();
+    }
+  }
+
   function chooseFile(selected) {
     if (!selected) return;
 
-    if (!selected.type.startsWith("image/")) {
-      setError("Please select a supported image file.");
+    const fileNameLower = (selected.name || "").toLowerCase();
+    const hasValidExt = ALLOWED_EXTENSIONS.some((ext) => fileNameLower.endsWith(ext));
+    const hasValidMime = selected.type && ALLOWED_MIME_TYPES.includes(selected.type.toLowerCase());
+
+    if (!hasValidExt && !hasValidMime) {
+      setError(
+        "Unsupported file format. Please select a PNG, JPEG, WebP, BMP, or TIFF image file."
+      );
       return;
     }
 
+    if (selected.size > 52_428_800) {
+      setError(
+        `File size (${(selected.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 50MB maximum upload limit. Please select an image under 50MB.`
+      );
+      return;
+    }
+
+    const currentLoadId = ++loadCounterRef.current;
     setError("");
     setResult(null);
+    setPreviewMode("slider");
     setFile(selected);
 
     const blobUrl = URL.createObjectURL(selected);
@@ -110,8 +276,18 @@ function App() {
 
     const image = new Image();
     image.onload = () => {
+      if (loadCounterRef.current !== currentLoadId) return;
+
       const origW = image.naturalWidth;
       const origH = image.naturalHeight;
+
+      if (!origW || !origH || origW < 16 || origH < 16) {
+        setError(
+          `Image dimensions (${origW} × ${origH} px) are smaller than the minimum 16 × 16 pixel requirement.`
+        );
+        return;
+      }
+
       setDimensions({ width: origW, height: origH });
 
       if (sizingMode === "factor") {
@@ -125,6 +301,14 @@ function App() {
         }));
       }
     };
+
+    image.onerror = () => {
+      if (loadCounterRef.current !== currentLoadId) return;
+      setError(
+        "Failed to decode image. The file may be corrupt or encoded in an unsupported variant."
+      );
+    };
+
     image.src = blobUrl;
   }
 
@@ -287,15 +471,19 @@ function App() {
   function downloadImage() {
     if (!result?.dataUrl) return;
 
+    const baseName = file?.name
+      ? file.name.replace(/\.[^/.]+$/, "")
+      : "upscaled";
+    const ext = (result.outputFormat || settings.outputFormat || "png").toLowerCase();
+
     const link = document.createElement("a");
     link.href = result.dataUrl;
-    link.download = `upscaled-image.${settings.outputFormat.toLowerCase()}`;
+    link.download = `${baseName}_upscaled_${result.targetWidth || settings.targetWidth}x${result.targetHeight || settings.targetHeight}.${ext}`;
     document.body.appendChild(link);
     link.click();
     link.remove();
   }
 
-  const activePreview = result?.dataUrl || preview;
   const isOversized = Number(settings.targetWidth) > 8192 || Number(settings.targetHeight) > 8192;
 
   return (
@@ -336,28 +524,31 @@ function App() {
               <h2>Your image</h2>
             </div>
             {file && (
-              <button
-                className="text-button"
-                onClick={() => {
-                  setFile(null);
-                  setResult(null);
-                  setDimensions({ width: 0, height: 0 });
-                  setPreview((old) => {
-                    if (old.startsWith("blob:")) URL.revokeObjectURL(old);
-                    return "";
-                  });
-                  setError("");
-                }}
-              >
-                Remove image
-              </button>
+              <div className="preview-actions">
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={handleReplaceImage}
+                  title="Choose a different image"
+                >
+                  Replace image
+                </button>
+                <button
+                  type="button"
+                  className="text-button text-button-danger"
+                  onClick={handleRemoveImage}
+                  title="Clear selected image and results"
+                >
+                  Remove
+                </button>
+              </div>
             )}
           </div>
 
           <input
             ref={inputRef}
             type="file"
-            accept="image/*"
+            accept="image/*,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff"
             hidden
             onChange={(event) => chooseFile(event.target.files?.[0])}
           />
@@ -383,23 +574,77 @@ function App() {
               }}
               role="button"
               tabIndex={0}
+              aria-label="Upload image area. Click or drag and drop an image file here."
             >
               <div className="upload-icon">↑</div>
               <h3>Drop your image here</h3>
-              <p>or browse files on your device</p>
+              <p>or click to browse files on your device</p>
               <span className="outline-button">Choose image</span>
-              <small>JPG · PNG · WebP · BMP · Other supported formats</small>
+              <small>Supported formats: PNG, JPEG, WebP, BMP, TIFF (Max 50MB · Min 16×16 px)</small>
             </div>
           ) : (
             <div className="preview-card">
-              <div className="preview-image">
-                <img src={activePreview} alt="Image preview" />
-              </div>
+              {result && (
+                <div className="preview-mode-bar" role="tablist" aria-label="Preview display modes">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={previewMode === "slider"}
+                    className={`preview-mode-btn ${previewMode === "slider" ? "active" : ""}`}
+                    onClick={() => setPreviewMode("slider")}
+                  >
+                    ↔ Before / After
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={previewMode === "processed"}
+                    className={`preview-mode-btn ${previewMode === "processed" ? "active" : ""}`}
+                    onClick={() => setPreviewMode("processed")}
+                  >
+                    Processed Output ({result.targetWidth} × {result.targetHeight})
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={previewMode === "original"}
+                    className={`preview-mode-btn ${previewMode === "original" ? "active" : ""}`}
+                    onClick={() => setPreviewMode("original")}
+                  >
+                    Original Input ({dimensions.width} × {dimensions.height})
+                  </button>
+                </div>
+              )}
+
+              {result && previewMode === "slider" ? (
+                <ImageComparisonSlider
+                  originalSrc={preview}
+                  processedSrc={result.dataUrl}
+                  originalDimensions={dimensions}
+                  processedDimensions={{
+                    width: result.targetWidth,
+                    height: result.targetHeight,
+                  }}
+                />
+              ) : result && previewMode === "processed" ? (
+                <div className="preview-image">
+                  <img src={result.dataUrl} alt="Processed output preview" />
+                </div>
+              ) : (
+                <div className="preview-image">
+                  <img src={preview} alt="Original image preview" />
+                </div>
+              )}
+
               <div className="file-details">
                 <div className="file-name">{file.name}</div>
                 <div className="file-meta">
-                  {(file.size / 1024).toFixed(1)} KB
+                  {file.size >= 1048576
+                    ? `${(file.size / 1048576).toFixed(2)} MB`
+                    : `${(file.size / 1024).toFixed(1)} KB`}
                   {dimensions.width > 0 && ` · ${dimensions.width} × ${dimensions.height} px`}
+                  {dimensions.width > 0 && ` · Aspect: ${getAspectRatioLabel(dimensions.width, dimensions.height)}`}
+                  {file.type ? ` · ${file.type.replace("image/", "").toUpperCase()}` : ""}
                   {result && " · Processed"}
                 </div>
               </div>
@@ -410,15 +655,15 @@ function App() {
             <div className="image-info">
               <div>
                 <span>Original file</span>
-                <strong>{file.type || "Unknown format"}</strong>
+                <strong>{file.type ? file.type.replace("image/", "").toUpperCase() : (file.name ? file.name.split(".").pop().toUpperCase() : "Unknown")}</strong>
               </div>
               <div>
                 <span>Original resolution</span>
                 <strong>{dimensions.width > 0 ? `${dimensions.width} × ${dimensions.height} px` : "Reading..."}</strong>
               </div>
               <div>
-                <span>Output format</span>
-                <strong>{settings.outputFormat}</strong>
+                <span>Aspect ratio</span>
+                <strong>{getAspectRatioLabel(dimensions.width, dimensions.height)}</strong>
               </div>
               <div>
                 <span>Target resolution</span>
@@ -428,8 +673,55 @@ function App() {
           )}
 
           {result && (
-            <div className="success-message">
-              ✓ Processing complete ({result.processingDurationMs}ms). Output: {result.targetWidth} × {result.targetHeight} px ({result.outputFormat}, {result.dpi} DPI).
+            <div className="result-metrics-card">
+              <div className="result-metrics-heading">
+                <span>✓ Processing Completed Successfully</span>
+                {result.processingDurationMs !== undefined && (
+                  <span>{result.processingDurationMs} ms</span>
+                )}
+              </div>
+              <div className="result-metrics-grid">
+                <div className="result-metric-item">
+                  <span>Input Dimensions</span>
+                  <strong>{dimensions.width} × {dimensions.height} px</strong>
+                </div>
+                <div className="result-metric-item">
+                  <span>Output Dimensions</span>
+                  <strong>{result.targetWidth} × {result.targetHeight} px</strong>
+                </div>
+                <div className="result-metric-item">
+                  <span>Scale Factor</span>
+                  <strong>
+                    {dimensions.width > 0
+                      ? `${(result.targetWidth / dimensions.width).toFixed(2).replace(/\.00$/, "")}×`
+                      : `${settings.scaleFactor}×`}
+                  </strong>
+                </div>
+                <div className="result-metric-item">
+                  <span>Output Format &amp; DPI</span>
+                  <strong>{result.outputFormat || settings.outputFormat} · {result.dpi || settings.dpi} DPI</strong>
+                </div>
+                {result.outputSizeBytes > 0 && (
+                  <div className="result-metric-item">
+                    <span>Output File Size</span>
+                    <strong>
+                      {result.outputSizeBytes >= 1048576
+                        ? `${(result.outputSizeBytes / 1048576).toFixed(2)} MB`
+                        : `${(result.outputSizeBytes / 1024).toFixed(1)} KB`}
+                    </strong>
+                  </div>
+                )}
+                {file.size > 0 && (
+                  <div className="result-metric-item">
+                    <span>Original File Size</span>
+                    <strong>
+                      {file.size >= 1048576
+                        ? `${(file.size / 1048576).toFixed(2)} MB`
+                        : `${(file.size / 1024).toFixed(1)} KB`}
+                    </strong>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </section>

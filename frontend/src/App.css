@@ -180,6 +180,16 @@
   border-color: var(--color-black);
 }
 
+.text-button-danger {
+  color: var(--text-muted);
+}
+
+.text-button-danger:hover {
+  background: var(--color-black);
+  color: var(--color-white);
+  border-color: var(--color-black);
+}
+
 /* =========================================================================
    Dropzone & Image Upload Area
    ========================================================================= */
@@ -254,8 +264,49 @@
   letter-spacing: 0.3px;
 }
 
+/* Preview Actions (Header) */
+.preview-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Preview Mode Selector Bar (When Result is Available) */
+.preview-mode-bar {
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+  background: var(--bg-surface-alt);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.preview-mode-btn {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.preview-mode-btn:hover {
+  color: var(--color-black);
+  background: var(--bg-surface);
+}
+
+.preview-mode-btn.active {
+  background: var(--color-black);
+  color: var(--color-white);
+  border-color: var(--color-black);
+}
+
 /* =========================================================================
-   Image Preview Card
+   Image Preview Card & Interactive Comparison Slider
    ========================================================================= */
 
 .preview-card {
@@ -266,7 +317,7 @@
 }
 
 .preview-image {
-  height: 350px;
+  height: 380px;
   padding: 16px;
   display: grid;
   place-items: center;
@@ -290,6 +341,109 @@
   object-fit: contain;
   border-radius: 4px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* Comparison Slider */
+.comparison-container {
+  position: relative;
+  height: 380px;
+  overflow: hidden;
+  user-select: none;
+  touch-action: none;
+  cursor: ew-resize;
+  background-image: linear-gradient(45deg, #eeeeee 25%, transparent 25%),
+    linear-gradient(-45deg, #eeeeee 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #eeeeee 75%),
+    linear-gradient(-45deg, transparent 75%, #eeeeee 75%);
+  background-size: 18px 18px;
+  background-position:
+    0 0,
+    0 9px,
+    9px -9px,
+    -9px 0;
+  background-color: #fafafa;
+}
+
+.comparison-container:focus-visible {
+  outline: 2px solid var(--color-black);
+  outline-offset: -2px;
+}
+
+.comparison-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.comparison-layer img {
+  width: 100%;
+  height: 100%;
+  padding: 16px;
+  object-fit: contain;
+  display: block;
+}
+
+.comparison-badge {
+  position: absolute;
+  bottom: 12px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  border-radius: 4px;
+  background: rgba(18, 18, 18, 0.88);
+  color: var(--color-white);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.badge-original {
+  left: 12px;
+}
+
+.badge-processed {
+  right: 12px;
+}
+
+.comparison-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-white);
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.5);
+  transform: translateX(-50%);
+  z-index: 10;
+  pointer-events: none;
+}
+
+.comparison-handle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--color-black);
+  color: var(--color-white);
+  border: 2px solid var(--color-white);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  font-size: 14px;
+  font-weight: 900;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.comparison-handle span {
+  line-height: 1;
 }
 
 .file-details {
@@ -718,6 +872,57 @@
   border: 1px solid var(--color-gray-400);
   color: var(--color-black);
   font-weight: 600;
+}
+
+/* Result Metrics Card */
+.result-metrics-card {
+  margin-top: 16px;
+  padding: 16px;
+  background: var(--bg-surface-alt);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.result-metrics-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.result-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.result-metric-item {
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.result-metric-item span {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.result-metric-item strong {
+  display: block;
+  font-size: 13px;
+  color: var(--color-black);
+  font-weight: 800;
 }
 
 /* =========================================================================
