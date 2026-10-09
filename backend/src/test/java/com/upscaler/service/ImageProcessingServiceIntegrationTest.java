@@ -453,4 +453,48 @@ class ImageProcessingServiceIntegrationTest {
                 () -> imageProcessingService.processImage(largeFile, settings));
         assertTrue(ex.getMessage().contains("50MB"));
     }
+
+    @Test
+    @DisplayName("Service upscale transparent PNG -> BMP succeeds, handles alpha cleanly, and produces valid BMP bytes")
+    void testProcessImagePngToBmp_handlesAlphaCleanly() throws Exception {
+        byte[] inputBytes = createPngBytes(32, 32, true);
+        MockMultipartFile file = new MockMultipartFile("file", "test.png", "image/png", inputBytes);
+
+        UpscaleSettingsRequest settings = new UpscaleSettingsRequest();
+        settings.setScaleFactor(2);
+        settings.setOutputFormat("BMP");
+
+        ImageProcessingService.ProcessedImageResult result = imageProcessingService.processImage(file, settings);
+
+        assertNotNull(result);
+        assertEquals("image/bmp", result.mimeType());
+        assertEquals(64, result.response().getTargetWidth());
+        assertEquals(64, result.response().getTargetHeight());
+        assertEquals("BMP", result.response().getOutputFormat());
+        assertTrue(result.imageBytes().length > 0);
+        assertEquals((byte) 0x42, result.imageBytes()[0], "BMP signature magic byte 1 ('B')");
+        assertEquals((byte) 0x4D, result.imageBytes()[1], "BMP signature magic byte 2 ('M')");
+    }
+
+    @Test
+    @DisplayName("Service upscale PNG -> WebP succeeds and produces valid WebP RIFF bytes")
+    void testProcessImagePngToWebp_success() throws Exception {
+        byte[] inputBytes = createPngBytes(32, 32, false);
+        MockMultipartFile file = new MockMultipartFile("file", "test.png", "image/png", inputBytes);
+
+        UpscaleSettingsRequest settings = new UpscaleSettingsRequest();
+        settings.setScaleFactor(2);
+        settings.setOutputFormat("WEBP");
+
+        ImageProcessingService.ProcessedImageResult result = imageProcessingService.processImage(file, settings);
+
+        assertNotNull(result);
+        assertEquals("image/webp", result.mimeType());
+        assertEquals(64, result.response().getTargetWidth());
+        assertEquals(64, result.response().getTargetHeight());
+        assertEquals("WEBP", result.response().getOutputFormat());
+        assertTrue(result.imageBytes().length > 0);
+        String header = new String(result.imageBytes(), 0, 4);
+        assertEquals("RIFF", header, "WebP container RIFF header");
+    }
 }

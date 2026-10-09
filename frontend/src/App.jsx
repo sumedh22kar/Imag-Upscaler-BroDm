@@ -81,7 +81,10 @@ function sanitizeFilename(name) {
   if (!name) return "image";
   return name
     .replace(/\.[^/.]+$/, "")
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
+    .replace(/[<>:"/\\|?*]/g, "_")
+    .split("")
+    .filter((ch) => ch.charCodeAt(0) >= 32)
+    .join("")
     .trim()
     .slice(0, 80) || "image";
 }
@@ -135,7 +138,9 @@ async function parseApiError(response) {
         message = text.trim();
       }
     }
-  } catch (_) {}
+  } catch {
+    // Fall back to HTTP status message below
+  }
 
   if (!message) {
     switch (response.status) {
@@ -203,7 +208,9 @@ function ImageComparisonSlider({
       setIsDragging(false);
       try {
         e.currentTarget.releasePointerCapture(e.pointerId);
-      } catch (err) {}
+      } catch {
+        // Pointer capture may have already been released
+      }
     }
   };
 

@@ -139,7 +139,7 @@ public class ImageProcessingService {
             targetFormat = "TIFF";
         }
 
-        boolean hasAlpha = inputImage.getColorModel().hasAlpha() && !targetFormat.equals("JPEG");
+        boolean hasAlpha = inputImage.getColorModel().hasAlpha() && !targetFormat.equals("JPEG") && !targetFormat.equals("BMP");
         int imageType = hasAlpha ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
 
         BufferedImage scaledImage = new BufferedImage(targetWidth, targetHeight, imageType);
@@ -455,7 +455,20 @@ public class ImageProcessingService {
             }
 
             // Fallback for BMP, WEBP or default writers
-            boolean written = ImageIO.write(image, format.toLowerCase(), baos);
+            BufferedImage imageToWrite = image;
+            if ("BMP".equalsIgnoreCase(format) && image.getColorModel().hasAlpha()) {
+                imageToWrite = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
+                Graphics2D g = imageToWrite.createGraphics();
+                try {
+                    g.setColor(Color.WHITE);
+                    g.fillRect(0, 0, image.getWidth(), image.getHeight());
+                    g.drawImage(image, 0, 0, null);
+                } finally {
+                    g.dispose();
+                }
+            }
+
+            boolean written = ImageIO.write(imageToWrite, format.toLowerCase(), baos);
 
             if (!written) {
                 throw new InvalidImageException(

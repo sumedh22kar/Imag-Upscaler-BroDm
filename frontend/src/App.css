@@ -1323,6 +1323,20 @@ select:disabled {
     gap: 12px;
   }
 
+  .mode-tab {
+    padding: 8px 6px;
+    font-size: 11px;
+  }
+
+  .preview-mode-bar {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .result-metrics-grid {
+    grid-template-columns: 1fr;
+  }
+
   .scale-options {
     grid-template-columns: repeat(2, 1fr);
     gap: 8px;
