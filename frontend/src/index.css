@@ -1,15 +1,51 @@
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
 
 :root {
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-  color: #20283a;
-  background: #fafbfe;
+  /* Strict Monochrome Design Tokens */
+  --color-black: #000000;
+  --color-white: #ffffff;
+  --color-gray-950: #0a0a0a;
+  --color-gray-900: #121212;
+  --color-gray-800: #1e1e1e;
+  --color-gray-700: #2e2e2e;
+  --color-gray-600: #4a4a4a;
+  --color-gray-500: #6b6b6b;
+  --color-gray-400: #949494;
+  --color-gray-300: #c7c7c7;
+  --color-gray-200: #e5e5e5;
+  --color-gray-150: #ececec;
+  --color-gray-100: #f4f4f4;
+  --color-gray-50: #fafafa;
+
+  /* Semantic Layout Tokens */
+  --bg-app: #fafafa;
+  --bg-surface: #ffffff;
+  --bg-surface-alt: #f5f5f5;
+  --bg-surface-inset: #eeeeee;
+  --border-subtle: #e5e5e5;
+  --border-medium: #c7c7c7;
+  --border-strong: #121212;
+
+  --text-primary: #121212;
+  --text-secondary: #4a4a4a;
+  --text-muted: #6b6b6b;
+  --text-inverse: #ffffff;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 9999px;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.05);
+
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: var(--text-primary);
+  background: var(--bg-app);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-optical-sizing: auto;
-  font-weight: 400;
 }
 
 * {
@@ -25,23 +61,38 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: #fafbfe;
+  background: var(--bg-app);
+  color: var(--text-primary);
 }
 
 button,
 input,
 select {
   font: inherit;
+  color: inherit;
 }
 
 button:focus-visible,
 a:focus-visible,
+input:focus-visible,
+select:focus-visible,
 [role="button"]:focus-visible {
-  outline: 3px solid #a69aff;
-  outline-offset: 3px;
+  outline: 2px solid var(--color-black);
+  outline-offset: 2px;
 }
 
 ::selection {
-  background: #ded9ff;
-  color: #28204f;
+  background: var(--color-black);
+  color: var(--color-white);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

@@ -302,10 +302,10 @@ function App() {
     <main className="app-shell">
       <header className="topbar">
         <a className="brand" href="/">
-          <span className="brand-icon">U</span>
+          <span className="brand-icon">P</span>
           <span>
-            Pixel<span className="brand-accent">Perfect</span>
-            <small>IMAGE UPSCALER</small>
+            PixelPerfect
+            <small>IMAGE RESIZER &amp; PRINT TOOL</small>
           </span>
         </a>
         <div className="free-badge">
@@ -315,7 +315,7 @@ function App() {
 
       <section className="hero">
         <div className="eyebrow">
-          <span className="eyebrow-dot" /> SIMPLE IMAGE PROCESSING
+          <span className="eyebrow-dot" /> DETERMINISTIC IMAGE PROCESSING
         </div>
         <h1>
           Bigger images.
