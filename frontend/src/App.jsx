@@ -43,6 +43,28 @@ function getAspectRatioLabel(width, height) {
   return `${ratio.toFixed(2)}:1`;
 }
 
+const PRESET_METADATA = {
+  A5: { name: "A5", wMm: 148, hMm: 210, cm: "14.8 × 21.0 cm", in: "5.83 × 8.27 in" },
+  A4: { name: "A4", wMm: 210, hMm: 297, cm: "21.0 × 29.7 cm", in: "8.27 × 11.69 in" },
+  A3: { name: "A3", wMm: 297, hMm: 420, cm: "29.7 × 42.0 cm", in: "11.69 × 16.54 in" },
+  LETTER: { name: "Letter", wMm: 215.9, hMm: 279.4, cm: "21.6 × 27.9 cm", in: "8.50 × 11.00 in" },
+  LEGAL: { name: "Legal", wMm: 215.9, hMm: 355.6, cm: "21.6 × 35.6 cm", in: "8.50 × 14.00 in" },
+};
+
+function computeEffectiveDimensions(origW, origH, targetW, targetH, maintainAspect) {
+  const w = Number(targetW);
+  const h = Number(targetH);
+  if (!w || !h || isNaN(w) || isNaN(h) || w < 16 || h < 16) return null;
+  if (!origW || !origH || !maintainAspect) return { width: w, height: h };
+  const targetRatio = w / h;
+  const origRatio = origW / origH;
+  if (origRatio > targetRatio) {
+    return { width: w, height: Math.round(w / origRatio) };
+  } else {
+    return { width: Math.round(h * origRatio), height: h };
+  }
+}
+
 function ImageComparisonSlider({
   originalSrc,
   processedSrc,
@@ -158,7 +180,8 @@ function App() {
   const loadCounterRef = useRef(0);
 
   // Sizing mode & Print size calculator state
-  const [sizingMode, setSizingMode] = useState("factor"); // "factor" | "print"
+  const [sizingMode, setSizingMode] = useState("factor"); // "factor" | "custom" | "print"
+  const [aspectRatioLocked, setAspectRatioLocked] = useState(true);
   const [printPreset, setPrintPreset] = useState("A4");
   const [orientation, setOrientation] = useState("portrait");
   const [customUnit, setCustomUnit] = useState("cm"); // "cm" | "in"
@@ -292,8 +315,8 @@ function App() {
 
       if (sizingMode === "factor") {
         const scale = Number(settings.scaleFactor) || 2;
-        const newW = Math.min(8192, Math.max(16, Math.round(origW * scale)));
-        const newH = Math.min(8192, Math.max(16, Math.round(origH * scale)));
+        const newW = Math.max(16, Math.round(origW * scale));
+        const newH = Math.max(16, Math.round(origH * scale));
         setSettings((old) => ({
           ...old,
           targetWidth: String(newW),
@@ -319,8 +342,9 @@ function App() {
 
     const baseW = dimensions.width > 0 ? dimensions.width : 1240;
     const baseH = dimensions.height > 0 ? dimensions.height : 1754;
-    const newW = Math.min(8192, Math.max(16, Math.round(baseW * scale)));
-    const newH = Math.min(8192, Math.max(16, Math.round(baseH * scale)));
+    // Calculate un-clamped target dimensions to avoid silent clamping
+    const newW = Math.max(16, Math.round(baseW * scale));
+    const newH = Math.max(16, Math.round(baseH * scale));
 
     setSettings((old) => ({
       ...old,
@@ -328,6 +352,79 @@ function App() {
       targetWidth: String(newW),
       targetHeight: String(newH),
     }));
+  }
+
+  function handleCustomWidthChange(val) {
+    setSizingMode("custom");
+    setResult(null);
+    setError("");
+
+    if (!aspectRatioLocked) {
+      setSettings((old) => ({ ...old, targetWidth: val }));
+      return;
+    }
+
+    const num = Number(val);
+    const ratio =
+      dimensions.width > 0 && dimensions.height > 0
+        ? dimensions.width / dimensions.height
+        : Number(settings.targetWidth) && Number(settings.targetHeight)
+          ? Number(settings.targetWidth) / Number(settings.targetHeight)
+          : 1;
+
+    if (!isNaN(num) && num > 0) {
+      const computedH = Math.round(num / ratio);
+      setSettings((old) => ({
+        ...old,
+        targetWidth: val,
+        targetHeight: String(computedH),
+      }));
+    } else {
+      setSettings((old) => ({ ...old, targetWidth: val }));
+    }
+  }
+
+  function handleCustomHeightChange(val) {
+    setSizingMode("custom");
+    setResult(null);
+    setError("");
+
+    if (!aspectRatioLocked) {
+      setSettings((old) => ({ ...old, targetHeight: val }));
+      return;
+    }
+
+    const num = Number(val);
+    const ratio =
+      dimensions.width > 0 && dimensions.height > 0
+        ? dimensions.width / dimensions.height
+        : Number(settings.targetWidth) && Number(settings.targetHeight)
+          ? Number(settings.targetWidth) / Number(settings.targetHeight)
+          : 1;
+
+    if (!isNaN(num) && num > 0) {
+      const computedW = Math.round(num * ratio);
+      setSettings((old) => ({
+        ...old,
+        targetHeight: val,
+        targetWidth: String(computedW),
+      }));
+    } else {
+      setSettings((old) => ({ ...old, targetHeight: val }));
+    }
+  }
+
+  function resetToOriginalDimensions() {
+    if (dimensions.width > 0 && dimensions.height > 0) {
+      setSettings((old) => ({
+        ...old,
+        scaleFactor: "1",
+        targetWidth: String(dimensions.width),
+        targetHeight: String(dimensions.height),
+      }));
+      setResult(null);
+      setError("");
+    }
   }
 
   // Fetch print size calculations from Spring Boot backend
@@ -384,24 +481,40 @@ function App() {
     calculatePrintSizes();
   }, [calculatePrintSizes]);
 
+  const targetWNum = Number(settings.targetWidth);
+  const targetHNum = Number(settings.targetHeight);
+
+  let dimensionWarning = "";
+  if (
+    settings.targetWidth === "" ||
+    settings.targetHeight === "" ||
+    isNaN(targetWNum) ||
+    isNaN(targetHNum)
+  ) {
+    dimensionWarning = "Target width and height must both be valid positive numbers.";
+  } else if (targetWNum < 16 || targetHNum < 16) {
+    dimensionWarning = `Target dimensions (${targetWNum} × ${targetHNum} px) cannot be smaller than the minimum 16 × 16 pixel backend limit.`;
+  } else if (targetWNum > 8192 || targetHNum > 8192) {
+    dimensionWarning = `Target dimensions (${targetWNum} × ${targetHNum} px) exceed the backend maximum limit of 8192 × 8192 pixels. Please adjust dimensions or lower DPI.`;
+  }
+
+  const isInvalidDimensions = Boolean(dimensionWarning);
+  const effectiveOutput = computeEffectiveDimensions(
+    dimensions.width,
+    dimensions.height,
+    settings.targetWidth,
+    settings.targetHeight,
+    settings.maintainAspectRatio
+  );
+
   async function processImage() {
     if (!file) {
       setError("Upload an image first.");
       return;
     }
 
-    const targetW = Number(settings.targetWidth);
-    const targetH = Number(settings.targetHeight);
-
-    if (!targetW || !targetH || targetW < 16 || targetH < 16) {
-      setError("Width and height must both be at least 16 pixels.");
-      return;
-    }
-
-    if (targetW > 8192 || targetH > 8192) {
-      setError(
-        `Target dimensions (${targetW} × ${targetH} px) exceed the maximum allowable resolution of 8192 × 8192 px. Please adjust dimensions or lower DPI.`
-      );
+    if (isInvalidDimensions) {
+      setError(dimensionWarning);
       return;
     }
 
@@ -483,8 +596,6 @@ function App() {
     link.click();
     link.remove();
   }
-
-  const isOversized = Number(settings.targetWidth) > 8192 || Number(settings.targetHeight) > 8192;
 
   return (
     <main className="app-shell">
@@ -734,51 +845,120 @@ function App() {
             </div>
           </div>
 
-          {/* Sizing Mode Tabs */}
+          {/* Sizing Method Selector (3 Clear Modes) */}
           <label className="field-label">Sizing method</label>
           <div className="mode-tabs">
             <button
               className={`mode-tab ${sizingMode === "factor" ? "active" : ""}`}
-              onClick={() => setSizingMode("factor")}
+              onClick={() => {
+                setSizingMode("factor");
+                changeScale(settings.scaleFactor || "2");
+              }}
               type="button"
             >
-              <span>Multiplier (1×, 2×, 4×)</span>
+              <span>Scale Factor</span>
+            </button>
+            <button
+              className={`mode-tab ${sizingMode === "custom" ? "active" : ""}`}
+              onClick={() => setSizingMode("custom")}
+              type="button"
+            >
+              <span>Custom Pixels</span>
             </button>
             <button
               className={`mode-tab ${sizingMode === "print" ? "active" : ""}`}
               onClick={() => setSizingMode("print")}
               type="button"
             >
-              <span>🖨️ Print Size Calculator</span>
+              <span>🖨️ Print Calculator</span>
             </button>
           </div>
 
-          {sizingMode === "factor" ? (
+          {/* Mode 1: Scale Multiplier Options (1x, 2x, 4x, 8x) */}
+          {sizingMode === "factor" && (
             <>
-              <label className="field-label">Resize factor</label>
+              <label className="field-label">Resize multiplier</label>
               <div className="scale-options">
-                {["1", "2", "4"].map((value) => (
+                {[
+                  { value: "1", label: "1×", desc: "Original (100%)" },
+                  { value: "2", label: "2×", desc: "Double (200%)" },
+                  { value: "4", label: "4×", desc: "Quadruple (400%)" },
+                  { value: "8", label: "8×", desc: "Max (800%)" },
+                ].map((item) => (
                   <button
-                    key={value}
+                    key={item.value}
                     type="button"
-                    className={`scale-option ${
-                      settings.scaleFactor === value ? "selected" : ""
-                    }`}
-                    onClick={() => changeScale(value)}
+                    className={`scale-option ${settings.scaleFactor === item.value ? "selected" : ""}`}
+                    onClick={() => changeScale(item.value)}
                   >
-                    <strong>{value}×</strong>
-                    <span>
-                      {value === "1"
-                        ? "Original"
-                        : value === "2"
-                          ? "Double size"
-                          : "Quadruple"}
-                    </span>
+                    <strong>{item.label}</strong>
+                    <span>{item.desc}</span>
                   </button>
                 ))}
               </div>
             </>
-          ) : (
+          )}
+
+          {/* Mode 2: Custom Dimensions with Aspect Ratio Lock */}
+          {sizingMode === "custom" && (
+            <div className="custom-dim-section">
+              <label className="field-label" style={{ marginBottom: "12px" }}>Custom Pixel Dimensions</label>
+              <div className="custom-dim-grid">
+                <label>
+                  Width (px)
+                  <input
+                    type="number"
+                    min="16"
+                    max="8192"
+                    value={settings.targetWidth}
+                    onChange={(e) => handleCustomWidthChange(e.target.value)}
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  className={`aspect-lock-btn ${aspectRatioLocked ? "locked" : "unlocked"}`}
+                  onClick={() => setAspectRatioLocked(!aspectRatioLocked)}
+                  aria-pressed={aspectRatioLocked}
+                  aria-label={aspectRatioLocked ? "Aspect ratio locked. Click to unlock." : "Aspect ratio unlocked. Click to lock."}
+                  title={aspectRatioLocked ? "Aspect ratio locked (proportional changes)" : "Aspect ratio unlocked (independent changes)"}
+                >
+                  <span className="lock-icon">{aspectRatioLocked ? "🔒" : "🔓"}</span>
+                  <span className="lock-text">{aspectRatioLocked ? "Locked" : "Unlocked"}</span>
+                </button>
+
+                <label>
+                  Height (px)
+                  <input
+                    type="number"
+                    min="16"
+                    max="8192"
+                    value={settings.targetHeight}
+                    onChange={(e) => handleCustomHeightChange(e.target.value)}
+                  />
+                </label>
+              </div>
+
+              <div className="custom-dim-hints">
+                <span>
+                  {aspectRatioLocked ? "Proportional sizing active" : "Independent width & height editing"}
+                  {dimensions.width > 0 && ` · Aspect: ${getAspectRatioLabel(dimensions.width, dimensions.height)}`}
+                </span>
+                {dimensions.width > 0 && (
+                  <button
+                    type="button"
+                    className="reset-dim-btn"
+                    onClick={resetToOriginalDimensions}
+                  >
+                    Reset to 1× ({dimensions.width} × {dimensions.height})
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Mode 3: Print Size Calculator */}
+          {sizingMode === "print" && (
             <div className="print-section">
               <div className="field-row">
                 <label>
@@ -873,7 +1053,7 @@ function App() {
                     <div className="calc-preset-name">
                       {printPreset === "CUSTOM"
                         ? `Custom ${customWidth} × ${customHeight} ${customUnit}`
-                        : `${printPreset} ${orientation}`}
+                        : `${PRESET_METADATA[printPreset]?.name || printPreset} · ${orientation === "portrait" ? "Portrait" : "Landscape"} (${orientation === "landscape" ? (PRESET_METADATA[printPreset]?.hMm / 10).toFixed(1) + " × " + (PRESET_METADATA[printPreset]?.wMm / 10).toFixed(1) + " cm" : PRESET_METADATA[printPreset]?.cm || ""})`}
                     </div>
                   </div>
                   <div className="calc-value">
@@ -891,55 +1071,77 @@ function App() {
             </div>
           )}
 
-          <div className="field-row">
-            <label>
-              Width (px)
-              <input
-                type="number"
-                min="16"
-                max="8192"
-                value={settings.targetWidth}
-                onChange={(event) =>
-                  updateSetting("targetWidth", event.target.value)
-                }
-              />
-            </label>
-            <label>
-              Height (px)
-              <input
-                type="number"
-                min="16"
-                max="8192"
-                value={settings.targetHeight}
-                onChange={(event) =>
-                  updateSetting("targetHeight", event.target.value)
-                }
-              />
-            </label>
+          {/* Dimension Fitting Mode (Preserve Aspect vs Exact Dimensions) */}
+          <div className="fit-mode-section">
+            <label className="field-label">Dimension Fitting Mode</label>
+            <div className="fit-mode-options">
+              <button
+                type="button"
+                className={`fit-mode-card ${settings.maintainAspectRatio ? "selected" : ""}`}
+                onClick={() => updateSetting("maintainAspectRatio", true)}
+                aria-pressed={settings.maintainAspectRatio}
+              >
+                <div className="fit-mode-title">
+                  <span className="fit-mode-indicator">{settings.maintainAspectRatio ? "●" : "○"}</span>
+                  <strong>Fit within target box</strong>
+                </div>
+                <p>
+                  Preserves original aspect ratio without distortion. Output fits inside target dimensions and may be smaller on one edge.
+                </p>
+              </button>
+              <button
+                type="button"
+                className={`fit-mode-card ${!settings.maintainAspectRatio ? "selected" : ""}`}
+                onClick={() => updateSetting("maintainAspectRatio", false)}
+                aria-pressed={!settings.maintainAspectRatio}
+              >
+                <div className="fit-mode-title">
+                  <span className="fit-mode-indicator">{!settings.maintainAspectRatio ? "●" : "○"}</span>
+                  <strong>Exact requested dimensions</strong>
+                </div>
+                <p>
+                  Produces exact target width &amp; height. If aspect ratio differs from the original, the image will stretch to fill.
+                </p>
+              </button>
+            </div>
           </div>
 
-          {isOversized && (
-            <div className="limit-warning" style={{ marginBottom: "16px" }}>
-              <span className="warning-icon">⚠️</span>
-              <div>
-                Dimensions exceed the backend limit of 8192 × 8192 pixels. Please adjust values before resizing.
+          {/* Planned Output Dimension Preview */}
+          {effectiveOutput && (
+            <div className="output-summary-card">
+              <div className="output-summary-header">
+                <span className="output-summary-title">Planned Output Resolution</span>
+                <span className="output-summary-badge">
+                  {settings.maintainAspectRatio ? "PROPORTIONAL FIT" : "EXACT SIZE"}
+                </span>
+              </div>
+              <div className="output-summary-grid">
+                <div className="output-summary-item">
+                  <span>Target Box</span>
+                  <strong>{settings.targetWidth} × {settings.targetHeight} px</strong>
+                </div>
+                <div className="output-summary-item">
+                  <span>Final Output</span>
+                  <strong>{effectiveOutput.width} × {effectiveOutput.height} px</strong>
+                </div>
+                <div className="output-summary-item">
+                  <span>Effective Scale</span>
+                  <strong>
+                    {dimensions.width > 0
+                      ? `${(effectiveOutput.width / dimensions.width).toFixed(2).replace(/\.00$/, "")}×`
+                      : `${settings.scaleFactor}×`}
+                  </strong>
+                </div>
               </div>
             </div>
           )}
 
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={settings.maintainAspectRatio}
-              onChange={(event) =>
-                updateSetting("maintainAspectRatio", event.target.checked)
-              }
-            />
-            <span>
-              <strong>Maintain aspect ratio</strong>
-              <small>Prevent distortion by fitting within target bounds</small>
-            </span>
-          </label>
+          {dimensionWarning && (
+            <div className="limit-warning" style={{ marginBottom: "16px" }}>
+              <span className="warning-icon">⚠️</span>
+              <div>{dimensionWarning}</div>
+            </div>
+          )}
 
           <div className="divider" />
 
@@ -998,7 +1200,7 @@ function App() {
           <div className="processing-note">
             <span className="note-icon">i</span>
             <p>
-              Uses deterministic bicubic resampling with embedded DPI metadata. Output dimensions are currently capped at 8192 × 8192 pixels.
+              Uses deterministic bicubic resampling with embedded DPI metadata. Output dimensions are capped between 16 × 16 px and 8192 × 8192 pixels.
             </p>
           </div>
 
@@ -1007,14 +1209,21 @@ function App() {
           <button
             className="primary-button"
             onClick={processImage}
-            disabled={!file || busy || isOversized}
+            disabled={!file || busy || isInvalidDimensions}
+            title={
+              !file
+                ? "Select or upload an image first"
+                : isInvalidDimensions
+                  ? dimensionWarning
+                  : "Resize image with current settings"
+            }
           >
             {busy ? (
               <>
                 <span className="spinner" /> Processing image...
               </>
-            ) : isOversized ? (
-              <>Dimensions Exceed 8192px Cap</>
+            ) : isInvalidDimensions ? (
+              <>Adjust Dimensions to Continue</>
             ) : (
               <>Resize image <span>→</span></>
             )}
