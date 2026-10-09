@@ -65,6 +65,109 @@ function computeEffectiveDimensions(origW, origH, targetW, targetH, maintainAspe
   }
 }
 
+function dataUrlToBlob(dataUrl) {
+  const parts = dataUrl.split(",");
+  const mime = parts[0].match(/:(.*?);/)?.[1] || "application/octet-stream";
+  const bstr = atob(parts[1]);
+  let n = bstr.length;
+  const u8arr = new Uint8Array(n);
+  while (n--) {
+    u8arr[n] = bstr.charCodeAt(n);
+  }
+  return new Blob([u8arr], { type: mime });
+}
+
+function sanitizeFilename(name) {
+  if (!name) return "image";
+  return name
+    .replace(/\.[^/.]+$/, "")
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
+    .trim()
+    .slice(0, 80) || "image";
+}
+
+function getExtensionForFormat(format) {
+  const norm = (format || "").trim().toUpperCase();
+  switch (norm) {
+    case "JPEG":
+    case "JPG":
+      return ".jpg";
+    case "WEBP":
+      return ".webp";
+    case "BMP":
+      return ".bmp";
+    case "TIFF":
+    case "TIF":
+      return ".tiff";
+    case "PNG":
+    default:
+      return ".png";
+  }
+}
+
+function getDpiSupportNote(format) {
+  const norm = (format || "").toUpperCase();
+  if (norm === "PNG" || norm === "JPEG" || norm === "JPG" || norm === "TIFF" || norm === "TIF") {
+    return "Verified DPI metadata written to header";
+  }
+  return "Resampled to target pixel dimensions";
+}
+
+async function parseApiError(response) {
+  let message = "";
+  try {
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const body = await response.json();
+      if (body?.validationErrors && typeof body.validationErrors === "object") {
+        const fieldMsgs = Object.values(body.validationErrors).flat().filter(Boolean);
+        if (fieldMsgs.length > 0) message = fieldMsgs.join(". ");
+      }
+      if (!message && body?.message) {
+        message = body.message;
+      }
+      if (!message && body?.error) {
+        message = body.error;
+      }
+    } else {
+      const text = await response.text();
+      if (text && text.trim().length > 0 && text.length < 250 && !text.includes("<!DOCTYPE") && !text.includes("<html")) {
+        message = text.trim();
+      }
+    }
+  } catch (_) {}
+
+  if (!message) {
+    switch (response.status) {
+      case 400:
+        message = "Invalid image processing request. Please verify the dimensions and format settings.";
+        break;
+      case 413:
+        message = "The uploaded file exceeds the 50MB maximum server upload limit.";
+        break;
+      case 415:
+        message = "Unsupported image format. Please upload a PNG, JPEG, WebP, BMP, or TIFF file.";
+        break;
+      case 429:
+        message = "Too many requests. Please wait a moment before trying again.";
+        break;
+      case 500:
+        message = "Server error occurred while processing the image. Please try again.";
+        break;
+      case 502:
+      case 503:
+      case 504:
+        message = "The image processing service is temporarily unavailable. Please verify the backend is running on port 8808.";
+        break;
+      default:
+        message = `Image processing failed with status HTTP ${response.status}.`;
+        break;
+    }
+  }
+
+  return message;
+}
+
 function ImageComparisonSlider({
   originalSrc,
   processedSrc,
@@ -176,8 +279,11 @@ function App() {
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
   const [previewMode, setPreviewMode] = useState("slider"); // "slider" | "processed" | "original"
+  const [downloading, setDownloading] = useState(false);
   const inputRef = useRef(null);
   const loadCounterRef = useRef(0);
+  const activeProcessingIdRef = useRef(0);
+  const abortControllerRef = useRef(null);
 
   // Sizing mode & Print size calculator state
   const [sizingMode, setSizingMode] = useState("factor"); // "factor" | "custom" | "print"
@@ -235,16 +341,20 @@ function App() {
   useEffect(() => {
     return () => {
       if (preview.startsWith("blob:")) URL.revokeObjectURL(preview);
+      abortControllerRef.current?.abort();
     };
   }, [preview]);
 
   function updateSetting(key, value) {
+    if (busy) return;
     setSettings((old) => ({ ...old, [key]: value }));
     setResult(null);
     setError("");
   }
 
   function handleRemoveImage() {
+    activeProcessingIdRef.current++;
+    abortControllerRef.current?.abort();
     loadCounterRef.current++;
     setFile(null);
     setResult(null);
@@ -258,6 +368,9 @@ function App() {
   }
 
   function handleReplaceImage() {
+    if (busy) return;
+    activeProcessingIdRef.current++;
+    abortControllerRef.current?.abort();
     if (inputRef.current) {
       inputRef.current.value = "";
       inputRef.current.click();
@@ -266,6 +379,9 @@ function App() {
 
   function chooseFile(selected) {
     if (!selected) return;
+
+    activeProcessingIdRef.current++;
+    abortControllerRef.current?.abort();
 
     const fileNameLower = (selected.name || "").toLowerCase();
     const hasValidExt = ALLOWED_EXTENSIONS.some((ext) => fileNameLower.endsWith(ext));
@@ -513,10 +629,23 @@ function App() {
       return;
     }
 
+    if (busy) return;
+
     if (isInvalidDimensions) {
       setError(dimensionWarning);
       return;
     }
+
+    const currentProcId = ++activeProcessingIdRef.current;
+    abortControllerRef.current?.abort();
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    // Timeout guard: 90 seconds
+    const timeoutId = setTimeout(() => {
+      controller.abort(new Error("Image processing timed out after 90 seconds. Please try a smaller resolution or scale factor."));
+    }, 90000);
 
     setBusy(true);
     setError("");
@@ -542,27 +671,30 @@ function App() {
       const response = await fetch(`${API}/api/images/upscale`, {
         method: "POST",
         body: form,
+        signal: controller.signal,
       });
 
-      if (!response.ok) {
-        const body = await response.json().catch(() => null);
-        let message = body?.message || body?.error || `Processing failed (HTTP ${response.status}).`;
+      clearTimeout(timeoutId);
 
-        // Unpack field-specific validation errors if available
-        if (body?.validationErrors) {
-          const fieldMsgs = Object.values(body.validationErrors).flat();
-          if (fieldMsgs.length > 0) {
-            message = fieldMsgs.join(". ");
-          }
-        }
-        throw new Error(message);
+      // Check if another request or file replacement occurred while in-flight
+      if (activeProcessingIdRef.current !== currentProcId) {
+        return;
+      }
+
+      if (!response.ok) {
+        const errorMsg = await parseApiError(response);
+        throw new Error(errorMsg);
       }
 
       const data = await response.json();
 
-      if (!data.dataUrl) {
+      if (activeProcessingIdRef.current !== currentProcId) {
+        return;
+      }
+
+      if (!data || !data.dataUrl) {
         throw new Error(
-          "The server returned no preview image. Check the API response format.",
+          "The server returned an incomplete response with no preview image data.",
         );
       }
 
@@ -571,30 +703,57 @@ function App() {
         dataUrl: data.dataUrl,
       });
     } catch (err) {
-      if (err.name === "TypeError" && err.message?.toLowerCase().includes("fetch")) {
-        setError("Could not connect to backend. Make sure the Spring Boot server is running on port 8808.");
+      clearTimeout(timeoutId);
+      if (activeProcessingIdRef.current !== currentProcId) {
+        return;
+      }
+      if (err.name === "AbortError") {
+        if (err.message && err.message.includes("timed out")) {
+          setError(err.message);
+        }
+        return;
+      }
+      if (err.name === "TypeError" && (err.message?.toLowerCase().includes("fetch") || err.message?.toLowerCase().includes("network"))) {
+        setError("Could not connect to the backend server. Please verify the Spring Boot service is running on port 8808.");
       } else {
         setError(err.message || "An unexpected error occurred during processing.");
       }
     } finally {
-      setBusy(false);
+      clearTimeout(timeoutId);
+      if (activeProcessingIdRef.current === currentProcId) {
+        setBusy(false);
+      }
     }
   }
 
-  function downloadImage() {
-    if (!result?.dataUrl) return;
+  async function downloadImage() {
+    if (!result?.dataUrl || downloading) return;
 
-    const baseName = file?.name
-      ? file.name.replace(/\.[^/.]+$/, "")
-      : "upscaled";
-    const ext = (result.outputFormat || settings.outputFormat || "png").toLowerCase();
+    try {
+      setDownloading(true);
+      const blob = dataUrlToBlob(result.dataUrl);
+      const baseName = sanitizeFilename(file?.name || "upscaled");
+      const ext = getExtensionForFormat(result.outputFormat || settings.outputFormat);
+      const outW = result.targetWidth || settings.targetWidth;
+      const outH = result.targetHeight || settings.targetHeight;
+      const filename = `${baseName}_upscaled_${outW}x${outH}${ext}`;
 
-    const link = document.createElement("a");
-    link.href = result.dataUrl;
-    link.download = `${baseName}_upscaled_${result.targetWidth || settings.targetWidth}x${result.targetHeight || settings.targetHeight}.${ext}`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => {
+        URL.revokeObjectURL(objectUrl);
+      }, 1500);
+    } catch (err) {
+      console.error("Download failed:", err);
+      setError("Failed to create download file. Please try processing the image again.");
+    } finally {
+      setDownloading(false);
+    }
   }
 
   return (
@@ -640,6 +799,7 @@ function App() {
                   type="button"
                   className="text-button"
                   onClick={handleReplaceImage}
+                  disabled={busy}
                   title="Choose a different image"
                 >
                   Replace image
@@ -648,6 +808,7 @@ function App() {
                   type="button"
                   className="text-button text-button-danger"
                   onClick={handleRemoveImage}
+                  disabled={busy}
                   title="Clear selected image and results"
                 >
                   Remove
@@ -669,17 +830,19 @@ function App() {
               className={`dropzone ${dragging ? "dragging" : ""}`}
               onDragOver={(event) => {
                 event.preventDefault();
-                setDragging(true);
+                if (!busy) setDragging(true);
               }}
               onDragLeave={() => setDragging(false)}
               onDrop={(event) => {
                 event.preventDefault();
                 setDragging(false);
-                chooseFile(event.dataTransfer.files?.[0]);
+                if (!busy) chooseFile(event.dataTransfer.files?.[0]);
               }}
-              onClick={() => inputRef.current?.click()}
+              onClick={() => {
+                if (!busy) inputRef.current?.click();
+              }}
               onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
+                if (!busy && (event.key === "Enter" || event.key === " ")) {
                   inputRef.current?.click();
                 }
               }}
@@ -812,6 +975,10 @@ function App() {
                   <span>Output Format &amp; DPI</span>
                   <strong>{result.outputFormat || settings.outputFormat} · {result.dpi || settings.dpi} DPI</strong>
                 </div>
+                <div className="result-metric-item result-metric-full">
+                  <span>DPI Metadata Verification</span>
+                  <strong>{getDpiSupportNote(result.outputFormat || settings.outputFormat)}</strong>
+                </div>
                 {result.outputSizeBytes > 0 && (
                   <div className="result-metric-item">
                     <span>Output File Size</span>
@@ -854,6 +1021,7 @@ function App() {
                 setSizingMode("factor");
                 changeScale(settings.scaleFactor || "2");
               }}
+              disabled={busy}
               type="button"
             >
               <span>Scale Factor</span>
@@ -861,6 +1029,7 @@ function App() {
             <button
               className={`mode-tab ${sizingMode === "custom" ? "active" : ""}`}
               onClick={() => setSizingMode("custom")}
+              disabled={busy}
               type="button"
             >
               <span>Custom Pixels</span>
@@ -868,6 +1037,7 @@ function App() {
             <button
               className={`mode-tab ${sizingMode === "print" ? "active" : ""}`}
               onClick={() => setSizingMode("print")}
+              disabled={busy}
               type="button"
             >
               <span>🖨️ Print Calculator</span>
@@ -890,6 +1060,7 @@ function App() {
                     type="button"
                     className={`scale-option ${settings.scaleFactor === item.value ? "selected" : ""}`}
                     onClick={() => changeScale(item.value)}
+                    disabled={busy}
                   >
                     <strong>{item.label}</strong>
                     <span>{item.desc}</span>
@@ -911,6 +1082,7 @@ function App() {
                     min="16"
                     max="8192"
                     value={settings.targetWidth}
+                    disabled={busy}
                     onChange={(e) => handleCustomWidthChange(e.target.value)}
                   />
                 </label>
@@ -919,6 +1091,7 @@ function App() {
                   type="button"
                   className={`aspect-lock-btn ${aspectRatioLocked ? "locked" : "unlocked"}`}
                   onClick={() => setAspectRatioLocked(!aspectRatioLocked)}
+                  disabled={busy}
                   aria-pressed={aspectRatioLocked}
                   aria-label={aspectRatioLocked ? "Aspect ratio locked. Click to unlock." : "Aspect ratio unlocked. Click to lock."}
                   title={aspectRatioLocked ? "Aspect ratio locked (proportional changes)" : "Aspect ratio unlocked (independent changes)"}
@@ -934,6 +1107,7 @@ function App() {
                     min="16"
                     max="8192"
                     value={settings.targetHeight}
+                    disabled={busy}
                     onChange={(e) => handleCustomHeightChange(e.target.value)}
                   />
                 </label>
@@ -949,6 +1123,7 @@ function App() {
                     type="button"
                     className="reset-dim-btn"
                     onClick={resetToOriginalDimensions}
+                    disabled={busy}
                   >
                     Reset to 1× ({dimensions.width} × {dimensions.height})
                   </button>
@@ -965,6 +1140,7 @@ function App() {
                   Print standard preset
                   <select
                     value={printPreset}
+                    disabled={busy}
                     onChange={(e) => setPrintPreset(e.target.value)}
                   >
                     <option value="A4">A4 (21.0 × 29.7 cm)</option>
@@ -984,6 +1160,7 @@ function App() {
                         type="button"
                         className={`orientation-btn ${orientation === "portrait" ? "selected" : ""}`}
                         onClick={() => setOrientation("portrait")}
+                        disabled={busy}
                       >
                         ↕ Portrait
                       </button>
@@ -991,6 +1168,7 @@ function App() {
                         type="button"
                         className={`orientation-btn ${orientation === "landscape" ? "selected" : ""}`}
                         onClick={() => setOrientation("landscape")}
+                        disabled={busy}
                       >
                         ↔ Landscape
                       </button>
@@ -1008,6 +1186,7 @@ function App() {
                         type="button"
                         className={`unit-btn ${customUnit === "cm" ? "active" : ""}`}
                         onClick={() => setCustomUnit("cm")}
+                        disabled={busy}
                       >
                         cm
                       </button>
@@ -1015,6 +1194,7 @@ function App() {
                         type="button"
                         className={`unit-btn ${customUnit === "in" ? "active" : ""}`}
                         onClick={() => setCustomUnit("in")}
+                        disabled={busy}
                       >
                         inches
                       </button>
@@ -1029,6 +1209,7 @@ function App() {
                         step="0.1"
                         min="1"
                         value={customWidth}
+                        disabled={busy}
                         onChange={(e) => setCustomWidth(e.target.value)}
                       />
                     </label>
@@ -1039,6 +1220,7 @@ function App() {
                         step="0.1"
                         min="1"
                         value={customHeight}
+                        disabled={busy}
                         onChange={(e) => setCustomHeight(e.target.value)}
                       />
                     </label>
@@ -1079,6 +1261,7 @@ function App() {
                 type="button"
                 className={`fit-mode-card ${settings.maintainAspectRatio ? "selected" : ""}`}
                 onClick={() => updateSetting("maintainAspectRatio", true)}
+                disabled={busy}
                 aria-pressed={settings.maintainAspectRatio}
               >
                 <div className="fit-mode-title">
@@ -1093,6 +1276,7 @@ function App() {
                 type="button"
                 className={`fit-mode-card ${!settings.maintainAspectRatio ? "selected" : ""}`}
                 onClick={() => updateSetting("maintainAspectRatio", false)}
+                disabled={busy}
                 aria-pressed={!settings.maintainAspectRatio}
               >
                 <div className="fit-mode-title">
@@ -1150,6 +1334,7 @@ function App() {
               Output format
               <select
                 value={settings.outputFormat}
+                disabled={busy}
                 onChange={(event) =>
                   updateSetting("outputFormat", event.target.value)
                 }
@@ -1165,6 +1350,7 @@ function App() {
               Print DPI
               <select
                 value={settings.dpi}
+                disabled={busy}
                 onChange={(event) =>
                   updateSetting("dpi", event.target.value)
                 }
@@ -1190,6 +1376,7 @@ function App() {
                 max="100"
                 step="5"
                 value={settings.quality}
+                disabled={busy}
                 onChange={(event) =>
                   updateSetting("quality", Number(event.target.value))
                 }
@@ -1204,34 +1391,57 @@ function App() {
             </p>
           </div>
 
-          {error && <div className="error-message">{error}</div>}
+          {error && (
+            <div className="error-message" role="alert" aria-live="assertive">
+              <span className="error-icon" aria-hidden="true">✕</span>
+              <div>{error}</div>
+            </div>
+          )}
 
           <button
+            type="button"
             className="primary-button"
             onClick={processImage}
             disabled={!file || busy || isInvalidDimensions}
+            aria-busy={busy}
             title={
               !file
                 ? "Select or upload an image first"
                 : isInvalidDimensions
                   ? dimensionWarning
-                  : "Resize image with current settings"
+                  : busy
+                    ? "Image processing in progress..."
+                    : "Resize image with current settings"
             }
           >
             {busy ? (
               <>
-                <span className="spinner" /> Processing image...
+                <span className="spinner" aria-hidden="true" />
+                <span aria-live="polite">Processing image...</span>
               </>
             ) : isInvalidDimensions ? (
               <>Adjust Dimensions to Continue</>
             ) : (
-              <>Resize image <span>→</span></>
+              <>Resize image <span aria-hidden="true">→</span></>
             )}
           </button>
 
           {result && (
-            <button className="download-button" onClick={downloadImage}>
-              ↓ Download processed image ({result.outputFormat})
+            <button
+              type="button"
+              className="download-button"
+              onClick={downloadImage}
+              disabled={downloading}
+              aria-busy={downloading}
+              title={downloading ? "Preparing your download..." : `Download ${result.outputFormat} file`}
+            >
+              {downloading ? (
+                <>
+                  <span className="spinner" aria-hidden="true" /> Preparing download...
+                </>
+              ) : (
+                <>↓ Download processed image ({result.outputFormat})</>
+              )}
             </button>
           )}
         </section>

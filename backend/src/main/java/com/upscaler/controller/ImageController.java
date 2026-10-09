@@ -47,7 +47,15 @@ public class ImageController {
     ) {
         ImageProcessingService.ProcessedImageResult result = imageProcessingService.processImage(file, settings);
         String originalName = file.getOriginalFilename() != null ? file.getOriginalFilename() : "image";
+        originalName = originalName.replace('\\', '/');
+        if (originalName.contains("/")) {
+            originalName = originalName.substring(originalName.lastIndexOf('/') + 1);
+        }
         String baseName = originalName.contains(".") ? originalName.substring(0, originalName.lastIndexOf('.')) : originalName;
+        String sanitizedBaseName = baseName.replaceAll("[^a-zA-Z0-9._-]", "_");
+        if (sanitizedBaseName.isBlank()) {
+            sanitizedBaseName = "image";
+        }
         String extension = switch (result.response().getOutputFormat().toUpperCase()) {
             case "JPEG" -> ".jpg";
             case "WEBP" -> ".webp";
@@ -55,7 +63,7 @@ public class ImageController {
             case "TIFF", "TIF" -> ".tiff";
             default -> ".png";
         };
-        String filename = "upscaled_" + baseName + extension;
+        String filename = "upscaled_" + sanitizedBaseName + extension;
 
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
