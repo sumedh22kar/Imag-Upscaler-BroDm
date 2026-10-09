@@ -46,7 +46,16 @@ public class ImageController {
             @Valid @ModelAttribute UpscaleSettingsRequest settings
     ) {
         ImageProcessingService.ProcessedImageResult result = imageProcessingService.processImage(file, settings);
-        String filename = "upscaled_" + (file.getOriginalFilename() != null ? file.getOriginalFilename() : "image.png");
+        String originalName = file.getOriginalFilename() != null ? file.getOriginalFilename() : "image";
+        String baseName = originalName.contains(".") ? originalName.substring(0, originalName.lastIndexOf('.')) : originalName;
+        String extension = switch (result.response().getOutputFormat().toUpperCase()) {
+            case "JPEG" -> ".jpg";
+            case "WEBP" -> ".webp";
+            case "BMP" -> ".bmp";
+            case "TIFF", "TIF" -> ".tiff";
+            default -> ".png";
+        };
+        String filename = "upscaled_" + baseName + extension;
 
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
@@ -76,7 +85,7 @@ public class ImageController {
     public ResponseEntity<Map<String, Object>> getConfig() {
         Map<String, Object> config = new LinkedHashMap<>();
         config.put("supportedFormats", List.of("PNG", "JPEG", "WEBP", "BMP", "TIFF"));
-        config.put("supportedModels", List.of("standard", "ultra_sharp", "anime", "cinematic", "art", "bicubic"));
+        config.put("supportedModels", List.of("standard", "bicubic", "ultra_sharp"));
         config.put("minDimension", 16);
         config.put("maxDimension", 8192);
         config.put("maxScaleFactor", 8);

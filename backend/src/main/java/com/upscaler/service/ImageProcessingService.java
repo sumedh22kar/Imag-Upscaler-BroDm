@@ -9,11 +9,13 @@ import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
+import javax.imageio.ImageReader;
 import javax.imageio.ImageTypeSpecifier;
 import javax.imageio.ImageWriteParam;
 import javax.imageio.ImageWriter;
 import javax.imageio.metadata.IIOMetadata;
 import javax.imageio.metadata.IIOMetadataNode;
+import javax.imageio.stream.ImageInputStream;
 import javax.imageio.stream.MemoryCacheImageOutputStream;
 import java.awt.*;
 import java.awt.image.BufferedImage;
@@ -62,21 +64,64 @@ public class ImageProcessingService {
 
         validateFile(file);
 
-        BufferedImage inputImage;
+        byte[] fileBytes;
         try {
-            inputImage = ImageIO.read(new ByteArrayInputStream(file.getBytes()));
+            fileBytes = file.getBytes();
         } catch (IOException e) {
             throw new InvalidImageException("Failed to read image stream: " + e.getMessage(), e);
+        }
+
+        int origWidth;
+        int origHeight;
+        BufferedImage inputImage;
+
+        // Probing dimensions and pixel bounds before loading full raster into memory (Decompression bomb protection)
+        try (ByteArrayInputStream bais = new ByteArrayInputStream(fileBytes);
+             ImageInputStream iis = ImageIO.createImageInputStream(bais)) {
+
+            if (iis == null) {
+                throw new InvalidImageException("The uploaded file is not a valid or supported image stream");
+            }
+
+            Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
+            if (!readers.hasNext()) {
+                throw new InvalidImageException("The uploaded file is not a valid or supported image");
+            }
+
+            ImageReader reader = readers.next();
+            try {
+                reader.setInput(iis, true, false);
+                origWidth = reader.getWidth(0);
+                origHeight = reader.getHeight(0);
+
+                validateInputDimensions(origWidth, origHeight);
+
+                long totalInputPixels = (long) origWidth * origHeight;
+                long maxPixels = (long) maxWidthLimit * maxHeightLimit;
+                if (totalInputPixels > maxPixels) {
+                    throw new InvalidImageException(String.format(
+                            "Decoded image dimensions (%dx%d = %d pixels) exceed maximum allowable pixel count (%d pixels)",
+                            origWidth, origHeight, totalInputPixels, maxPixels
+                    ));
+                }
+
+                // Calculate and validate target dimensions before allocating scaled buffers
+                Dimension targetDim = calculateTargetDimensions(origWidth, origHeight, settings);
+                validateTargetDimensions(targetDim.width, targetDim.height);
+
+                inputImage = reader.read(0);
+            } finally {
+                reader.dispose();
+            }
+        } catch (InvalidImageException e) {
+            throw e;
+        } catch (IOException e) {
+            throw new InvalidImageException("Failed to inspect or decode image stream: " + e.getMessage(), e);
         }
 
         if (inputImage == null) {
             throw new InvalidImageException("The uploaded file is not a valid or supported image");
         }
-
-        int origWidth = inputImage.getWidth();
-        int origHeight = inputImage.getHeight();
-
-        validateInputDimensions(origWidth, origHeight);
 
         // Calculate target dimensions
         Dimension targetDim = calculateTargetDimensions(origWidth, origHeight, settings);
@@ -118,8 +163,12 @@ public class ImageProcessingService {
         }
 
         // Apply sharpening filter if requested
-        if (settings.getSharpenLevel() != null && settings.getSharpenLevel() > 0) {
-            scaledImage = applySharpen(scaledImage, settings.getSharpenLevel(), hasAlpha);
+        int effectiveSharpen = settings.getSharpenLevel() != null ? settings.getSharpenLevel() : 0;
+        if (effectiveSharpen == 0 && "ultra_sharp".equalsIgnoreCase(settings.getModel())) {
+            effectiveSharpen = 25;
+        }
+        if (effectiveSharpen > 0) {
+            scaledImage = applySharpen(scaledImage, effectiveSharpen, hasAlpha);
         }
 
         int targetDpi = (settings.getDpi() != null && settings.getDpi() >= 72 && settings.getDpi() <= 1200)
@@ -168,10 +217,14 @@ public class ImageProcessingService {
             throw new InvalidImageException("Image file is required and cannot be empty");
         }
 
+        if (file.getSize() > 52_428_800L) {
+            throw new InvalidImageException("Uploaded image exceeds maximum allowable file size (50MB)");
+        }
+
         String contentType = file.getContentType();
         if (contentType == null || !ALLOWED_CONTENT_TYPES.contains(contentType.toLowerCase())) {
             throw new InvalidImageException(
-                    "Unsupported image content type: " + contentType + ". Allowed types: JPEG, PNG, WEBP, BMP"
+                    "Unsupported image content type: " + contentType + ". Allowed types: JPEG, PNG, WEBP, BMP, TIFF"
             );
         }
     }
@@ -201,7 +254,7 @@ public class ImageProcessingService {
             throw new InvalidImageException(String.format(
                     "Calculated target dimensions too small: %dx%d. Minimum allowed dimensions are %dx%d",
                     targetWidth, targetHeight, minWidthLimit, minHeightLimit
-            ));
+                    ));
         }
 
         if (targetWidth > maxWidthLimit || targetHeight > maxHeightLimit) {
@@ -341,7 +394,67 @@ public class ImageProcessingService {
                 }
             }
 
-            // Fallback for BMP or default writers
+            if ("TIFF".equalsIgnoreCase(format) || "TIF".equalsIgnoreCase(format)) {
+                Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("tiff");
+                if (writers.hasNext()) {
+                    ImageWriter writer = writers.next();
+                    try (MemoryCacheImageOutputStream mcios = new MemoryCacheImageOutputStream(baos)) {
+                        writer.setOutput(mcios);
+                        ImageWriteParam param = writer.getDefaultWriteParam();
+                        ImageTypeSpecifier spec = ImageTypeSpecifier.createFromRenderedImage(image);
+                        IIOMetadata meta = writer.getDefaultImageMetadata(spec, param);
+
+                        if (meta != null) {
+                            try {
+                                IIOMetadataNode root = new IIOMetadataNode("com_sun_media_imageio_plugins_tiff_image_1.0");
+                                IIOMetadataNode ifd = new IIOMetadataNode("TIFFIFD");
+
+                                IIOMetadataNode xResField = new IIOMetadataNode("TIFFField");
+                                xResField.setAttribute("number", "282");
+                                xResField.setAttribute("name", "XResolution");
+                                IIOMetadataNode xRationals = new IIOMetadataNode("TIFFRationals");
+                                IIOMetadataNode xRational = new IIOMetadataNode("TIFFRational");
+                                xRational.setAttribute("value", dpi + "/1");
+                                xRationals.appendChild(xRational);
+                                xResField.appendChild(xRationals);
+                                ifd.appendChild(xResField);
+
+                                IIOMetadataNode yResField = new IIOMetadataNode("TIFFField");
+                                yResField.setAttribute("number", "283");
+                                yResField.setAttribute("name", "YResolution");
+                                IIOMetadataNode yRationals = new IIOMetadataNode("TIFFRationals");
+                                IIOMetadataNode yRational = new IIOMetadataNode("TIFFRational");
+                                yRational.setAttribute("value", dpi + "/1");
+                                yRationals.appendChild(yRational);
+                                yResField.appendChild(yRationals);
+                                ifd.appendChild(yResField);
+
+                                IIOMetadataNode unitField = new IIOMetadataNode("TIFFField");
+                                unitField.setAttribute("number", "296");
+                                unitField.setAttribute("name", "ResolutionUnit");
+                                IIOMetadataNode unitShorts = new IIOMetadataNode("TIFFShorts");
+                                IIOMetadataNode unitShort = new IIOMetadataNode("TIFFShort");
+                                unitShort.setAttribute("value", "2"); // 2 = Inch
+                                unitShorts.appendChild(unitShort);
+                                unitField.appendChild(unitShorts);
+                                ifd.appendChild(unitField);
+
+                                root.appendChild(ifd);
+                                meta.mergeTree("com_sun_media_imageio_plugins_tiff_image_1.0", root);
+                            } catch (Exception ignored) {
+                                // Proceed if native metadata merge fails
+                            }
+                        }
+
+                        writer.write(null, new IIOImage(image, null, meta), param);
+                    } finally {
+                        writer.dispose();
+                    }
+                    return baos.toByteArray();
+                }
+            }
+
+            // Fallback for BMP, WEBP or default writers
             boolean written = ImageIO.write(image, format.toLowerCase(), baos);
 
             if (!written) {

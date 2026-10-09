@@ -141,7 +141,25 @@ class ImageControllerTest {
                         .param("outputFormat", "PNG"))
                 .andExpect(status().isOk())
                 .andExpect(header().string("Content-Type", "image/png"))
-                .andExpect(header().exists("Content-Disposition"));
+                .andExpect(header().string("Content-Disposition", "attachment; filename=\"upscaled_test.png\""));
+    }
+
+    @Test
+    void testDownloadEndpointFilenameExtensionMatchesTiffFormat() throws Exception {
+        MockMultipartFile file = new MockMultipartFile(
+                "file",
+                "photo.png",
+                "image/png",
+                sampleImageBytes
+        );
+
+        mockMvc.perform(multipart("/api/images/download")
+                        .file(file)
+                        .param("scaleFactor", "2")
+                        .param("outputFormat", "TIFF"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Content-Type", "image/tiff"))
+                .andExpect(header().string("Content-Disposition", "attachment; filename=\"upscaled_photo.tiff\""));
     }
 
     @Test
@@ -282,8 +300,11 @@ class ImageControllerTest {
     void testConfigEndpoint() throws Exception {
         mockMvc.perform(get("/api/images/config"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.supportedFormats").isArray())
-                .andExpect(jsonPath("$.supportedModels").isArray())
+                .andExpect(jsonPath("$.supportedFormats[0]").value("PNG"))
+                .andExpect(jsonPath("$.supportedFormats[4]").value("TIFF"))
+                .andExpect(jsonPath("$.supportedModels[0]").value("standard"))
+                .andExpect(jsonPath("$.supportedModels[1]").value("bicubic"))
+                .andExpect(jsonPath("$.supportedModels[2]").value("ultra_sharp"))
                 .andExpect(jsonPath("$.maxDimension").value(8192));
     }
 }

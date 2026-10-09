@@ -226,6 +226,33 @@ class FormatRegistryTest {
     }
 
     @Test
+    void testWebpWriterMetadataSupport() {
+        Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("webp");
+        assertTrue(writers.hasNext(), "WebP writer must be registered");
+        ImageWriter writer = writers.next();
+        BufferedImage img = new BufferedImage(10, 10, BufferedImage.TYPE_INT_RGB);
+        ImageTypeSpecifier spec = ImageTypeSpecifier.createFromRenderedImage(img);
+        IIOMetadata meta = writer.getDefaultImageMetadata(spec, writer.getDefaultWriteParam());
+        // WebP ImageWriter does not support ImageIO IIOMetadata manipulation (returns null)
+        assertNull(meta, "WebP ImageIO plugin does not support dynamic IIOMetadata trees");
+        writer.dispose();
+    }
+
+    @Test
+    void testBmpWriterMetadataSupport() {
+        Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("bmp");
+        assertTrue(writers.hasNext(), "BMP writer must be registered");
+        ImageWriter writer = writers.next();
+        BufferedImage img = new BufferedImage(10, 10, BufferedImage.TYPE_INT_RGB);
+        ImageTypeSpecifier spec = ImageTypeSpecifier.createFromRenderedImage(img);
+        IIOMetadata meta = writer.getDefaultImageMetadata(spec, writer.getDefaultWriteParam());
+        assertNotNull(meta, "BMP ImageWriter metadata exists");
+        // JDK BMP writer metadata is read-only; mergeTree throws IllegalStateException
+        assertTrue(meta.isReadOnly(), "BMP writer metadata is read-only in JDK ImageIO");
+        writer.dispose();
+    }
+
+    @Test
     void testTiffWriterReaderAndResolutionMetadata() throws Exception {
         BufferedImage img = new BufferedImage(32, 32, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = img.createGraphics();
@@ -238,9 +265,56 @@ class FormatRegistryTest {
         assertTrue(writers.hasNext(), "TIFF writer must be available");
         ImageWriter writer = writers.next();
 
+        int targetDpi = 300;
         try (MemoryCacheImageOutputStream mcios = new MemoryCacheImageOutputStream(baos)) {
             writer.setOutput(mcios);
-            writer.write(new IIOImage(img, null, null));
+            ImageWriteParam param = writer.getDefaultWriteParam();
+            ImageTypeSpecifier spec = ImageTypeSpecifier.createFromRenderedImage(img);
+            IIOMetadata meta = writer.getDefaultImageMetadata(spec, param);
+
+            if (meta != null) {
+                IIOMetadataNode root = new IIOMetadataNode("com_sun_media_imageio_plugins_tiff_image_1.0");
+                IIOMetadataNode ifd = new IIOMetadataNode("TIFFIFD");
+
+                IIOMetadataNode xResField = new IIOMetadataNode("TIFFField");
+                xResField.setAttribute("number", "282");
+                xResField.setAttribute("name", "XResolution");
+                IIOMetadataNode xRationals = new IIOMetadataNode("TIFFRationals");
+                IIOMetadataNode xRational = new IIOMetadataNode("TIFFRational");
+                xRational.setAttribute("value", targetDpi + "/1");
+                xRationals.appendChild(xRational);
+                xResField.appendChild(xRationals);
+                ifd.appendChild(xResField);
+
+                IIOMetadataNode yResField = new IIOMetadataNode("TIFFField");
+                yResField.setAttribute("number", "283");
+                yResField.setAttribute("name", "YResolution");
+                IIOMetadataNode yRationals = new IIOMetadataNode("TIFFRationals");
+                IIOMetadataNode yRational = new IIOMetadataNode("TIFFRational");
+                yRational.setAttribute("value", targetDpi + "/1");
+                yRationals.appendChild(yRational);
+                yResField.appendChild(yRationals);
+                ifd.appendChild(yResField);
+
+                IIOMetadataNode unitField = new IIOMetadataNode("TIFFField");
+                unitField.setAttribute("number", "296");
+                unitField.setAttribute("name", "ResolutionUnit");
+                IIOMetadataNode unitShorts = new IIOMetadataNode("TIFFShorts");
+                IIOMetadataNode unitShort = new IIOMetadataNode("TIFFShort");
+                unitShort.setAttribute("value", "2"); // 2 = Inch
+                unitShorts.appendChild(unitShort);
+                unitField.appendChild(unitShorts);
+                ifd.appendChild(unitField);
+
+                root.appendChild(ifd);
+                try {
+                    meta.mergeTree("com_sun_media_imageio_plugins_tiff_image_1.0", root);
+                } catch (Exception e) {
+                    System.out.println("mergeTree native failed: " + e.getMessage());
+                }
+            }
+
+            writer.write(null, new IIOImage(img, null, meta), param);
         } finally {
             writer.dispose();
         }
@@ -258,6 +332,17 @@ class FormatRegistryTest {
             assertNotNull(readImg, "TIFF must decode successfully");
             assertEquals(32, readImg.getWidth());
             assertEquals(32, readImg.getHeight());
+
+            IIOMetadata readMeta = reader.getImageMetadata(0);
+            assertNotNull(readMeta, "TIFF reader metadata must not be null");
+            Node standardTree = readMeta.getAsTree("javax_imageio_1.0");
+            assertNotNull(standardTree, "TIFF standard metadata tree must not be null");
+            NodeList list = ((Element) standardTree).getElementsByTagName("HorizontalPixelSize");
+            assertTrue(list.getLength() > 0, "DPI metadata must exist in TIFF standard tree");
+            float sizeMm = Float.parseFloat(((Element) list.item(0)).getAttribute("value"));
+            int dpi = Math.round(25.4f / sizeMm);
+            assertEquals(300, dpi, "TIFF must retain 300 DPI metadata");
+
             reader.dispose();
         }
     }
