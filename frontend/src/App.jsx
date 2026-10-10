@@ -12,6 +12,7 @@ const initialSettings = {
   outputFormat: "PNG",
   dpi: "300",
   quality: 95,
+  model: "bicubic",
   maintainAspectRatio: true,
 };
 
@@ -673,7 +674,7 @@ function App() {
       form.append("outputFormat", settings.outputFormat);
       form.append("dpi", settings.dpi);
       form.append("quality", String(settings.quality));
-      form.append("model", "bicubic");
+      form.append("model", settings.model || "bicubic");
       form.append("denoiseLevel", "0");
       form.append("sharpenLevel", "0");
       form.append(
@@ -1067,19 +1068,49 @@ function App() {
                   { value: "2", label: "2×", desc: "Double (200%)" },
                   { value: "4", label: "4×", desc: "Quadruple (400%)" },
                   { value: "8", label: "8×", desc: "Max (800%)" },
-                ].map((item) => (
-                  <button
-                    key={item.value}
-                    type="button"
-                    className={`scale-option ${settings.scaleFactor === item.value ? "selected" : ""}`}
-                    onClick={() => changeScale(item.value)}
-                    disabled={busy}
-                  >
-                    <strong>{item.label}</strong>
-                    <span>{item.desc}</span>
-                  </button>
-                ))}
+                ].map((item) => {
+                  const baseW = dimensions.width;
+                  const baseH = dimensions.height;
+                  const scale = Number(item.value);
+
+                  const predictedW = Math.round(baseW * scale);
+                  const predictedH = Math.round(baseH * scale);
+
+                  const exceedsLimit =
+                    baseW > 0 &&
+                    baseH > 0 &&
+                    (predictedW > 8192 || predictedH > 8192);
+
+                  return (
+                    <button
+                      key={item.value}
+                      type="button"
+                      className={`scale-option ${settings.scaleFactor === item.value ? "selected" : ""}`}
+                      onClick={() => changeScale(item.value)}
+                      disabled={busy}
+                      title={
+                        exceedsLimit
+                          ? `Produces ${predictedW} × ${predictedH} px; maximum is 8192 × 8192 px`
+                          : `${predictedW || "—"} × ${predictedH || "—"} px`
+                      }
+                    >
+                      <strong>{item.label}</strong>
+                      <span>{item.desc}</span>
+                    </button>
+                  );
+                })}
               </div>
+
+              {dimensions.width > 0 &&
+                dimensions.height > 0 &&
+                (Math.round(dimensions.width * Number(settings.scaleFactor)) > 8192 ||
+                  Math.round(dimensions.height * Number(settings.scaleFactor)) > 8192) && (
+                  <p className="field-hint" role="alert">
+                    This scale exceeds the 8192 × 8192 px backend limit.
+                    Choose a smaller multiplier or use Custom Pixels.
+                    Current target: {settings.targetWidth} × {settings.targetHeight} px.
+                  </p>
+                )}
             </>
           )}
 
@@ -1265,6 +1296,28 @@ function App() {
               )}
             </div>
           )}
+
+          {/* Resampling Method */}
+          <div className="field-row">
+            <label>
+              Resampling method
+              <select
+                value={settings.model}
+                disabled={busy}
+                onChange={(event) =>
+                  updateSetting("model", event.target.value)
+                }
+              >
+                <option value="bicubic">Bicubic — Standard</option>
+                <option value="classic_pro">Classic Pro — Lanczos</option>
+              </select>
+              <small className="field-hint">
+                Classic Pro uses traditional Lanczos resampling. It can
+                preserve edges differently from Bicubic, but it does not
+                reconstruct missing image details using AI.
+              </small>
+            </label>
+          </div>
 
           {/* Dimension Fitting Mode (Preserve Aspect vs Exact Dimensions) */}
           <div className="fit-mode-section">

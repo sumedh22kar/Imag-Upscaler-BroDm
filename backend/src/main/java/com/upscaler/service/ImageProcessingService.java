@@ -194,27 +194,95 @@ public class ImageProcessingService {
             boolean hasAlpha = inputImage.getColorModel().hasAlpha() && !targetFormat.equals("JPEG") && !targetFormat.equals("BMP");
             int imageType = hasAlpha ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
 
-            scaledImage = new BufferedImage(targetWidth, targetHeight, imageType);
-            Graphics2D g2d = scaledImage.createGraphics();
+            boolean useClassicPro =
+                    "classic_pro".equalsIgnoreCase(settings.getModel());
 
-            try {
-                g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
-                g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-                g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                g2d.setRenderingHint(RenderingHints.KEY_COLOR_RENDERING, RenderingHints.VALUE_COLOR_RENDER_QUALITY);
-                g2d.setRenderingHint(RenderingHints.KEY_DITHERING, RenderingHints.VALUE_DITHER_ENABLE);
+            if (useClassicPro) {
+                BufferedImage resampledImage = null;
 
-                if (!hasAlpha) {
-                    g2d.setColor(Color.WHITE);
-                    g2d.fillRect(0, 0, targetWidth, targetHeight);
+                try {
+                    resampledImage = LanczosResampler.resize(
+                            inputImage, targetWidth, targetHeight);
+
+                    if (resampledImage == inputImage) {
+                        scaledImage = new BufferedImage(
+                                targetWidth, targetHeight, imageType);
+
+                        Graphics2D g2d = scaledImage.createGraphics();
+                        try {
+                            if (!hasAlpha) {
+                                g2d.setColor(Color.WHITE);
+                                g2d.fillRect(0, 0, targetWidth, targetHeight);
+                            }
+
+                            g2d.drawImage(resampledImage, 0, 0, null);
+                        } finally {
+                            g2d.dispose();
+                        }
+                    } else if (resampledImage.getType() == imageType) {
+                        scaledImage = resampledImage;
+                    } else {
+                        scaledImage = new BufferedImage(
+                                targetWidth, targetHeight, imageType);
+
+                        Graphics2D g2d = scaledImage.createGraphics();
+                        try {
+                            if (!hasAlpha) {
+                                g2d.setColor(Color.WHITE);
+                                g2d.fillRect(
+                                        0, 0, targetWidth, targetHeight);
+                            }
+                            g2d.drawImage(
+                                    resampledImage, 0, 0, null);
+                        } finally {
+                            g2d.dispose();
+                            resampledImage.flush();
+                        }
+                    }
+                } finally {
+                    if (inputImage != null) {
+                        inputImage.flush();
+                        inputImage = null;
+                    }
                 }
+            } else {
+                scaledImage = new BufferedImage(
+                        targetWidth, targetHeight, imageType);
+                Graphics2D g2d = scaledImage.createGraphics();
 
-                g2d.drawImage(inputImage, 0, 0, targetWidth, targetHeight, null);
-            } finally {
-                g2d.dispose();
-                if (inputImage != null) {
-                    inputImage.flush();
-                    inputImage = null;
+                try {
+                    g2d.setRenderingHint(
+                            RenderingHints.KEY_INTERPOLATION,
+                            RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                    g2d.setRenderingHint(
+                            RenderingHints.KEY_RENDERING,
+                            RenderingHints.VALUE_RENDER_QUALITY);
+                    g2d.setRenderingHint(
+                            RenderingHints.KEY_ANTIALIASING,
+                            RenderingHints.VALUE_ANTIALIAS_ON);
+                    g2d.setRenderingHint(
+                            RenderingHints.KEY_COLOR_RENDERING,
+                            RenderingHints.VALUE_COLOR_RENDER_QUALITY);
+                    g2d.setRenderingHint(
+                            RenderingHints.KEY_DITHERING,
+                            RenderingHints.VALUE_DITHER_ENABLE);
+
+                    if (!hasAlpha) {
+                        g2d.setColor(Color.WHITE);
+                        g2d.fillRect(
+                                0, 0, targetWidth, targetHeight);
+                    }
+
+                    g2d.drawImage(
+                            inputImage, 0, 0,
+                            targetWidth, targetHeight, null);
+                } finally {
+                    g2d.dispose();
+
+                    if (inputImage != null) {
+                        inputImage.flush();
+                        inputImage = null;
+                    }
                 }
             }
 

@@ -11,6 +11,7 @@ import org.springframework.mock.web.MockMultipartFile;
 import javax.imageio.ImageIO;
 import java.awt.*;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
@@ -152,6 +153,52 @@ class LargeImageWorkloadPerformanceTest {
         assertEquals(8192, result.response().getTargetWidth());
         assertEquals(8192, result.response().getTargetHeight());
         System.out.printf("[BENCHMARK] Max dimension workload (2048x2048 -> 8192x8192 JPEG): %d ms, heap delta: ~%d MB, output: %d bytes%n",
+                elapsed, memDeltaMb, result.imageBytes().length);
+    }
+
+    @Test
+    @DisplayName("Classic Pro: Lanczos resampling benchmark at 2x scale")
+    void testClassicProLanczosWorkload() throws Exception {
+        runGc();
+        long memBefore = Runtime.getRuntime().totalMemory()
+                - Runtime.getRuntime().freeMemory();
+
+        // Moderate workload: 1200x800 -> 2400x1600 (3.84 megapixels)
+        byte[] bytes = createTestImage(1200, 800, "jpeg", false);
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "classic-pro-benchmark.jpg", "image/jpeg", bytes);
+
+        UpscaleSettingsRequest settings = new UpscaleSettingsRequest();
+        settings.setScaleFactor(2);
+        settings.setOutputFormat("JPEG");
+        settings.setQuality(80);
+        settings.setModel("classic_pro");
+        settings.setSharpenLevel(0);
+
+        long start = System.currentTimeMillis();
+        ImageProcessingService.ProcessedImageResult result =
+                imageProcessingService.processImage(file, settings);
+        long elapsed = System.currentTimeMillis() - start;
+
+        long memAfter = Runtime.getRuntime().totalMemory()
+                - Runtime.getRuntime().freeMemory();
+        long memDeltaMb = Math.max(
+                0, (memAfter - memBefore) / (1024 * 1024));
+
+        assertNotNull(result);
+        assertEquals(2400, result.response().getTargetWidth());
+        assertEquals(1600, result.response().getTargetHeight());
+        assertEquals("classic_pro", result.response().getModel());
+
+        BufferedImage output = ImageIO.read(
+                new ByteArrayInputStream(result.imageBytes()));
+        assertNotNull(output, "Output must be a valid image");
+        assertEquals(2400, output.getWidth());
+        assertEquals(1600, output.getHeight());
+        output.flush();
+
+        System.out.printf(
+                "[BENCHMARK] Classic Pro Lanczos (1200x800 -> 2400x1600 JPEG): %d ms, heap delta: ~%d MB, output: %d bytes%n",
                 elapsed, memDeltaMb, result.imageBytes().length);
     }
 
