@@ -453,6 +453,12 @@ function App() {
       setError(
         "Failed to decode image. The file may be corrupt or encoded in an unsupported variant."
       );
+      setFile(null);
+      setPreview((old) => {
+        if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+        return "";
+      });
+      if (inputRef.current) inputRef.current.value = "";
     };
 
     image.src = blobUrl;
@@ -1047,7 +1053,7 @@ function App() {
               disabled={busy}
               type="button"
             >
-              <span>🖨️ Print Calculator</span>
+              <span>Print Calculator</span>
             </button>
           </div>
 
@@ -1103,8 +1109,8 @@ function App() {
                   aria-label={aspectRatioLocked ? "Aspect ratio locked. Click to unlock." : "Aspect ratio unlocked. Click to lock."}
                   title={aspectRatioLocked ? "Aspect ratio locked (proportional changes)" : "Aspect ratio unlocked (independent changes)"}
                 >
-                  <span className="lock-icon">{aspectRatioLocked ? "🔒" : "🔓"}</span>
-                  <span className="lock-text">{aspectRatioLocked ? "Locked" : "Unlocked"}</span>
+                  <span className="lock-icon" aria-hidden="true">{aspectRatioLocked ? "⫘" : "⫙"}</span>
+                  <span className="lock-text">{aspectRatioLocked ? "Linked" : "Independent"}</span>
                 </button>
 
                 <label>
@@ -1253,7 +1259,7 @@ function App() {
 
               {printCalcError && (
                 <div className="limit-warning">
-                  <span className="warning-icon">⚠️</span>
+                  <span className="warning-icon" aria-hidden="true">!</span>
                   <div>{printCalcError}</div>
                 </div>
               )}
@@ -1297,8 +1303,8 @@ function App() {
             </div>
           </div>
 
-          {/* Planned Output Dimension Preview */}
-          {effectiveOutput && (
+          {/* Planned Output Dimension Preview — only show when an image is loaded */}
+          {effectiveOutput && file && dimensions.width > 0 && (
             <div className="output-summary-card">
               <div className="output-summary-header">
                 <span className="output-summary-title">Planned Output Resolution</span>
@@ -1329,7 +1335,7 @@ function App() {
 
           {dimensionWarning && (
             <div className="limit-warning" style={{ marginBottom: "16px" }}>
-              <span className="warning-icon">⚠️</span>
+              <span className="warning-icon" aria-hidden="true">!</span>
               <div>{dimensionWarning}</div>
             </div>
           )}
@@ -1352,6 +1358,13 @@ function App() {
                   </option>
                 ))}
               </select>
+              <small className="field-hint">
+                {settings.outputFormat === "PNG" && "Lossless with transparency support. Larger file sizes."}
+                {settings.outputFormat === "JPEG" && "Lossy compression, no transparency. Smallest file sizes."}
+                {settings.outputFormat === "WEBP" && "Modern format, lossy or lossless, with transparency."}
+                {settings.outputFormat === "BMP" && "Uncompressed bitmap. Very large files, no metadata."}
+                {(settings.outputFormat === "TIFF" || settings.outputFormat === "TIF") && "Professional format with full metadata support."}
+              </small>
             </label>
             <label>
               Print DPI
@@ -1368,6 +1381,9 @@ function App() {
                 <option value="300">300 DPI · High Quality Print</option>
                 <option value="600">600 DPI · Ultra Fine</option>
               </select>
+              <small className="field-hint">
+                DPI sets print-resolution metadata. Higher DPI prints smaller but sharper at the same pixel count.
+              </small>
             </label>
           </div>
 
@@ -1392,9 +1408,9 @@ function App() {
           )}
 
           <div className="processing-note">
-            <span className="note-icon">i</span>
+            <span className="note-icon" aria-hidden="true">i</span>
             <p>
-              Uses deterministic bicubic resampling with embedded DPI metadata. Output dimensions are capped between 16 × 16 px and 8192 × 8192 pixels.
+              Uses deterministic bicubic resampling with embedded DPI metadata. Increasing pixel dimensions does not recover detail lost in the original capture. Output is capped at 16–8192 px per side.
             </p>
           </div>
 
@@ -1434,22 +1450,32 @@ function App() {
           </button>
 
           {result && (
-            <button
-              type="button"
-              className="download-button"
-              onClick={downloadImage}
-              disabled={downloading}
-              aria-busy={downloading}
-              title={downloading ? "Preparing your download..." : `Download ${result.outputFormat} file`}
-            >
-              {downloading ? (
-                <>
-                  <span className="spinner" aria-hidden="true" /> Preparing download...
-                </>
-              ) : (
-                <>↓ Download processed image ({result.outputFormat})</>
-              )}
-            </button>
+            <>
+              <button
+                type="button"
+                className="download-button"
+                onClick={downloadImage}
+                disabled={downloading}
+                aria-busy={downloading}
+                title={downloading ? "Preparing your download..." : `Download ${result.outputFormat} file`}
+              >
+                {downloading ? (
+                  <>
+                    <span className="spinner" aria-hidden="true" /> Preparing download...
+                  </>
+                ) : (
+                  <>↓ Download processed image ({result.outputFormat})</>
+                )}
+              </button>
+              <button
+                type="button"
+                className="secondary-action-button"
+                onClick={handleReplaceImage}
+                disabled={busy}
+              >
+                Process another image
+              </button>
+            </>
           )}
         </section>
       </div>

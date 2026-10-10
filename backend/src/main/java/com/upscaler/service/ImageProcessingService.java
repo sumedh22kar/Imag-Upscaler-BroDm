@@ -2,6 +2,7 @@ package com.upscaler.service;
 
 import com.upscaler.dto.ImageUploadResponse;
 import com.upscaler.dto.UpscaleSettingsRequest;
+import com.upscaler.exception.ConcurrentProcessingLimitExceededException;
 import com.upscaler.exception.InvalidImageException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -24,9 +25,12 @@ import java.awt.image.Kernel;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.Base64;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class ImageProcessingService {
@@ -42,6 +46,34 @@ public class ImageProcessingService {
 
     @Value("${upscaler.image.min-height:16}")
     private int minHeightLimit;
+
+    @Value("${upscaler.concurrency.max-concurrent-jobs:3}")
+    private int maxConcurrentJobs = 3;
+
+    @Value("${upscaler.concurrency.acquire-timeout-seconds:5}")
+    private int acquireTimeoutSeconds = 5;
+
+    private Semaphore processingSemaphore;
+
+    public synchronized Semaphore getSemaphore() {
+        if (this.processingSemaphore == null) {
+            this.processingSemaphore = new Semaphore(maxConcurrentJobs > 0 ? maxConcurrentJobs : 3, true);
+        }
+        return this.processingSemaphore;
+    }
+
+    public synchronized void setMaxConcurrentJobs(int maxConcurrentJobs) {
+        this.maxConcurrentJobs = maxConcurrentJobs;
+        this.processingSemaphore = new Semaphore(maxConcurrentJobs > 0 ? maxConcurrentJobs : 3, true);
+    }
+
+    public synchronized void setAcquireTimeoutSeconds(int acquireTimeoutSeconds) {
+        this.acquireTimeoutSeconds = acquireTimeoutSeconds;
+    }
+
+    public int getMaxConcurrentJobs() {
+        return maxConcurrentJobs;
+    }
 
     private static final List<String> ALLOWED_CONTENT_TYPES = List.of(
             "image/jpeg",
@@ -60,156 +92,192 @@ public class ImageProcessingService {
     public record ProcessedImageResult(ImageUploadResponse response, byte[] imageBytes, String mimeType) {}
 
     public ProcessedImageResult processImage(MultipartFile file, UpscaleSettingsRequest settings) {
-        long startTime = System.currentTimeMillis();
-
         validateFile(file);
 
-        byte[] fileBytes;
+        Semaphore semaphore = getSemaphore();
+        boolean acquired;
         try {
-            fileBytes = file.getBytes();
-        } catch (IOException e) {
-            throw new InvalidImageException("Failed to read image stream: " + e.getMessage(), e);
+            acquired = semaphore.tryAcquire(acquireTimeoutSeconds, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ConcurrentProcessingLimitExceededException("Image processing was interrupted while waiting for capacity");
         }
+
+        if (!acquired) {
+            throw new ConcurrentProcessingLimitExceededException(
+                    String.format("Server is currently at maximum concurrent image processing capacity (%d concurrent jobs). Please retry shortly.", maxConcurrentJobs)
+            );
+        }
+
+        try {
+            return doProcessImage(file, settings);
+        } finally {
+            semaphore.release();
+        }
+    }
+
+    private ProcessedImageResult doProcessImage(MultipartFile file, UpscaleSettingsRequest settings) {
+        long startTime = System.currentTimeMillis();
 
         int origWidth;
         int origHeight;
-        BufferedImage inputImage;
+        BufferedImage inputImage = null;
+        BufferedImage scaledImage = null;
 
         // Probing dimensions and pixel bounds before loading full raster into memory (Decompression bomb protection)
-        try (ByteArrayInputStream bais = new ByteArrayInputStream(fileBytes);
-             ImageInputStream iis = ImageIO.createImageInputStream(bais)) {
+        try {
+            try (InputStream inputStream = file.getInputStream();
+                 ImageInputStream iis = ImageIO.createImageInputStream(inputStream)) {
 
-            if (iis == null) {
-                throw new InvalidImageException("The uploaded file is not a valid or supported image stream");
+                if (iis == null) {
+                    throw new InvalidImageException("The uploaded file is not a valid or supported image stream");
+                }
+
+                Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
+                if (!readers.hasNext()) {
+                    throw new InvalidImageException("The uploaded file is not a valid or supported image");
+                }
+
+                ImageReader reader = readers.next();
+                try {
+                    reader.setInput(iis, true, false);
+                    origWidth = reader.getWidth(0);
+                    origHeight = reader.getHeight(0);
+
+                    validateInputDimensions(origWidth, origHeight);
+
+                    long totalInputPixels = (long) origWidth * origHeight;
+                    long maxPixels = (long) maxWidthLimit * maxHeightLimit;
+                    if (totalInputPixels > maxPixels) {
+                        throw new InvalidImageException(String.format(
+                                "Decoded image dimensions (%dx%d = %d pixels) exceed maximum allowable pixel count (%d pixels)",
+                                origWidth, origHeight, totalInputPixels, maxPixels
+                        ));
+                    }
+
+                    // Calculate and validate target dimensions before allocating scaled buffers
+                    Dimension targetDim = calculateTargetDimensions(origWidth, origHeight, settings);
+                    validateTargetDimensions(targetDim.width, targetDim.height);
+
+                    inputImage = reader.read(0);
+                } finally {
+                    reader.dispose();
+                }
+            } catch (InvalidImageException e) {
+                throw e;
+            } catch (IOException e) {
+                throw new InvalidImageException("Failed to inspect or decode image stream: " + e.getMessage(), e);
+            } catch (RuntimeException e) {
+                throw new InvalidImageException("Failed to decode corrupted or malformed image: " + e.getMessage(), e);
             }
 
-            Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
-            if (!readers.hasNext()) {
+            if (inputImage == null) {
                 throw new InvalidImageException("The uploaded file is not a valid or supported image");
             }
 
-            ImageReader reader = readers.next();
+            // Calculate target dimensions
+            Dimension targetDim = calculateTargetDimensions(origWidth, origHeight, settings);
+            int targetWidth = targetDim.width;
+            int targetHeight = targetDim.height;
+
+            validateTargetDimensions(targetWidth, targetHeight);
+
+            // Normalize output format
+            String targetFormat = settings.getOutputFormat() != null ? settings.getOutputFormat().toUpperCase() : "PNG";
+            if (targetFormat.equals("JPG")) {
+                targetFormat = "JPEG";
+            }
+            if (targetFormat.equals("TIF")) {
+                targetFormat = "TIFF";
+            }
+
+            boolean hasAlpha = inputImage.getColorModel().hasAlpha() && !targetFormat.equals("JPEG") && !targetFormat.equals("BMP");
+            int imageType = hasAlpha ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
+
+            scaledImage = new BufferedImage(targetWidth, targetHeight, imageType);
+            Graphics2D g2d = scaledImage.createGraphics();
+
             try {
-                reader.setInput(iis, true, false);
-                origWidth = reader.getWidth(0);
-                origHeight = reader.getHeight(0);
+                g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+                g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2d.setRenderingHint(RenderingHints.KEY_COLOR_RENDERING, RenderingHints.VALUE_COLOR_RENDER_QUALITY);
+                g2d.setRenderingHint(RenderingHints.KEY_DITHERING, RenderingHints.VALUE_DITHER_ENABLE);
 
-                validateInputDimensions(origWidth, origHeight);
-
-                long totalInputPixels = (long) origWidth * origHeight;
-                long maxPixels = (long) maxWidthLimit * maxHeightLimit;
-                if (totalInputPixels > maxPixels) {
-                    throw new InvalidImageException(String.format(
-                            "Decoded image dimensions (%dx%d = %d pixels) exceed maximum allowable pixel count (%d pixels)",
-                            origWidth, origHeight, totalInputPixels, maxPixels
-                    ));
+                if (!hasAlpha) {
+                    g2d.setColor(Color.WHITE);
+                    g2d.fillRect(0, 0, targetWidth, targetHeight);
                 }
 
-                // Calculate and validate target dimensions before allocating scaled buffers
-                Dimension targetDim = calculateTargetDimensions(origWidth, origHeight, settings);
-                validateTargetDimensions(targetDim.width, targetDim.height);
-
-                inputImage = reader.read(0);
+                g2d.drawImage(inputImage, 0, 0, targetWidth, targetHeight, null);
             } finally {
-                reader.dispose();
-            }
-        } catch (InvalidImageException e) {
-            throw e;
-        } catch (IOException e) {
-            throw new InvalidImageException("Failed to inspect or decode image stream: " + e.getMessage(), e);
-        }
-
-        if (inputImage == null) {
-            throw new InvalidImageException("The uploaded file is not a valid or supported image");
-        }
-
-        // Calculate target dimensions
-        Dimension targetDim = calculateTargetDimensions(origWidth, origHeight, settings);
-        int targetWidth = targetDim.width;
-        int targetHeight = targetDim.height;
-
-        validateTargetDimensions(targetWidth, targetHeight);
-
-        // Normalize output format
-        String targetFormat = settings.getOutputFormat() != null ? settings.getOutputFormat().toUpperCase() : "PNG";
-        if (targetFormat.equals("JPG")) {
-            targetFormat = "JPEG";
-        }
-        if (targetFormat.equals("TIF")) {
-            targetFormat = "TIFF";
-        }
-
-        boolean hasAlpha = inputImage.getColorModel().hasAlpha() && !targetFormat.equals("JPEG") && !targetFormat.equals("BMP");
-        int imageType = hasAlpha ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
-
-        BufferedImage scaledImage = new BufferedImage(targetWidth, targetHeight, imageType);
-        Graphics2D g2d = scaledImage.createGraphics();
-
-        try {
-            g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
-            g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-            g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g2d.setRenderingHint(RenderingHints.KEY_COLOR_RENDERING, RenderingHints.VALUE_COLOR_RENDER_QUALITY);
-            g2d.setRenderingHint(RenderingHints.KEY_DITHERING, RenderingHints.VALUE_DITHER_ENABLE);
-
-            if (!hasAlpha) {
-                g2d.setColor(Color.WHITE);
-                g2d.fillRect(0, 0, targetWidth, targetHeight);
+                g2d.dispose();
+                if (inputImage != null) {
+                    inputImage.flush();
+                    inputImage = null;
+                }
             }
 
-            g2d.drawImage(inputImage, 0, 0, targetWidth, targetHeight, null);
+            // Apply sharpening filter if requested
+            int effectiveSharpen = settings.getSharpenLevel() != null ? settings.getSharpenLevel() : 0;
+            if (effectiveSharpen == 0 && "ultra_sharp".equalsIgnoreCase(settings.getModel())) {
+                effectiveSharpen = 25;
+            }
+            if (effectiveSharpen > 0) {
+                BufferedImage sharpenedImage = applySharpen(scaledImage, effectiveSharpen, hasAlpha);
+                scaledImage.flush();
+                scaledImage = sharpenedImage;
+            }
+
+            int targetDpi = (settings.getDpi() != null && settings.getDpi() >= 72 && settings.getDpi() <= 1200)
+                    ? settings.getDpi()
+                    : 300;
+
+            // Encode image with DPI metadata
+            byte[] outputBytes = encodeImage(scaledImage, targetFormat, settings.getQuality(), targetDpi);
+            scaledImage.flush();
+            scaledImage = null;
+            long duration = System.currentTimeMillis() - startTime;
+
+            String mimeType = switch (targetFormat) {
+                case "JPEG" -> "image/jpeg";
+                case "WEBP" -> "image/webp";
+                case "BMP" -> "image/bmp";
+                case "TIFF", "TIF" -> "image/tiff";
+                default -> "image/png";
+            };
+
+            String base64Data = Base64.getEncoder().encodeToString(outputBytes);
+            String dataUrl = "data:" + mimeType + ";base64," + base64Data;
+
+            ImageUploadResponse response = new ImageUploadResponse();
+            response.setOriginalFilename(file.getOriginalFilename());
+            response.setContentType(file.getContentType());
+            response.setOriginalSizeBytes(file.getSize());
+            response.setOriginalWidth(origWidth);
+            response.setOriginalHeight(origHeight);
+
+            response.setTargetWidth(targetWidth);
+            response.setTargetHeight(targetHeight);
+            response.setScaleFactor(settings.getScaleFactor() != null ? settings.getScaleFactor() : 1);
+            response.setOutputFormat(targetFormat);
+            response.setDpi(targetDpi);
+            response.setOutputSizeBytes(outputBytes.length);
+            response.setProcessingDurationMs(duration);
+            response.setModel(settings.getModel() != null ? settings.getModel() : "standard");
+            response.setDataUrl(dataUrl);
+            response.setMessage(String.format("Successfully resized image from %dx%d to %dx%d (%s, %d DPI)",
+                    origWidth, origHeight, targetWidth, targetHeight, targetFormat, targetDpi));
+
+            return new ProcessedImageResult(response, outputBytes, mimeType);
         } finally {
-            g2d.dispose();
+            if (inputImage != null) {
+                inputImage.flush();
+            }
+            if (scaledImage != null) {
+                scaledImage.flush();
+            }
         }
-
-        // Apply sharpening filter if requested
-        int effectiveSharpen = settings.getSharpenLevel() != null ? settings.getSharpenLevel() : 0;
-        if (effectiveSharpen == 0 && "ultra_sharp".equalsIgnoreCase(settings.getModel())) {
-            effectiveSharpen = 25;
-        }
-        if (effectiveSharpen > 0) {
-            scaledImage = applySharpen(scaledImage, effectiveSharpen, hasAlpha);
-        }
-
-        int targetDpi = (settings.getDpi() != null && settings.getDpi() >= 72 && settings.getDpi() <= 1200)
-                ? settings.getDpi()
-                : 300;
-
-        // Encode image with DPI metadata
-        byte[] outputBytes = encodeImage(scaledImage, targetFormat, settings.getQuality(), targetDpi);
-        long duration = System.currentTimeMillis() - startTime;
-
-        String mimeType = switch (targetFormat) {
-            case "JPEG" -> "image/jpeg";
-            case "WEBP" -> "image/webp";
-            case "BMP" -> "image/bmp";
-            case "TIFF", "TIF" -> "image/tiff";
-            default -> "image/png";
-        };
-
-        String base64Data = Base64.getEncoder().encodeToString(outputBytes);
-        String dataUrl = "data:" + mimeType + ";base64," + base64Data;
-
-        ImageUploadResponse response = new ImageUploadResponse();
-        response.setOriginalFilename(file.getOriginalFilename());
-        response.setContentType(file.getContentType());
-        response.setOriginalSizeBytes(file.getSize());
-        response.setOriginalWidth(origWidth);
-        response.setOriginalHeight(origHeight);
-
-        response.setTargetWidth(targetWidth);
-        response.setTargetHeight(targetHeight);
-        response.setScaleFactor(settings.getScaleFactor() != null ? settings.getScaleFactor() : 1);
-        response.setOutputFormat(targetFormat);
-        response.setDpi(targetDpi);
-        response.setOutputSizeBytes(outputBytes.length);
-        response.setProcessingDurationMs(duration);
-        response.setModel(settings.getModel() != null ? settings.getModel() : "standard");
-        response.setDataUrl(dataUrl);
-        response.setMessage(String.format("Successfully resized image from %dx%d to %dx%d (%s, %d DPI)",
-                origWidth, origHeight, targetWidth, targetHeight, targetFormat, targetDpi));
-
-        return new ProcessedImageResult(response, outputBytes, mimeType);
     }
 
     public void validateFile(MultipartFile file) {
@@ -263,6 +331,15 @@ public class ImageProcessingService {
                     targetWidth, targetHeight, maxWidthLimit, maxHeightLimit
             ));
         }
+
+        long totalTargetPixels = (long) targetWidth * targetHeight;
+        long maxPixels = (long) maxWidthLimit * maxHeightLimit;
+        if (totalTargetPixels > maxPixels) {
+            throw new InvalidImageException(String.format(
+                    "Target dimensions (%dx%d = %d pixels) exceed maximum allowable pixel count (%d pixels)",
+                    targetWidth, targetHeight, totalTargetPixels, maxPixels
+            ));
+        }
     }
 
     public Dimension calculateTargetDimensions(int origWidth, int origHeight, UpscaleSettingsRequest settings) {
@@ -293,7 +370,16 @@ public class ImageProcessingService {
                 ? settings.getScaleFactor()
                 : 2;
 
-        return new Dimension(origWidth * factor, origHeight * factor);
+        long calcW = (long) origWidth * factor;
+        long calcH = (long) origHeight * factor;
+        if (calcW > maxWidthLimit || calcH > maxHeightLimit) {
+            throw new InvalidImageException(String.format(
+                    "Scaled dimensions %dx%d exceed maximum allowable resolution (%dx%d)",
+                    calcW, calcH, maxWidthLimit, maxHeightLimit
+            ));
+        }
+
+        return new Dimension((int) calcW, (int) calcH);
     }
 
     private BufferedImage applySharpen(BufferedImage source, int level, boolean hasAlpha) {
@@ -316,7 +402,8 @@ public class ImageProcessingService {
     }
 
     private byte[] encodeImage(BufferedImage image, String format, Integer quality, int dpi) {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int estimatedInitialCapacity = (int) Math.max(65536L, Math.min((long) image.getWidth() * image.getHeight() / 8L, 8L * 1024 * 1024));
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(estimatedInitialCapacity);
 
         try {
             if ("JPEG".equalsIgnoreCase(format)) {
@@ -456,8 +543,10 @@ public class ImageProcessingService {
 
             // Fallback for BMP, WEBP or default writers
             BufferedImage imageToWrite = image;
+            boolean convertedBmp = false;
             if ("BMP".equalsIgnoreCase(format) && image.getColorModel().hasAlpha()) {
                 imageToWrite = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
+                convertedBmp = true;
                 Graphics2D g = imageToWrite.createGraphics();
                 try {
                     g.setColor(Color.WHITE);
@@ -468,12 +557,18 @@ public class ImageProcessingService {
                 }
             }
 
-            boolean written = ImageIO.write(imageToWrite, format.toLowerCase(), baos);
+            try {
+                boolean written = ImageIO.write(imageToWrite, format.toLowerCase(), baos);
 
-            if (!written) {
-                throw new InvalidImageException(
-                        "Output format is not supported by the installed image encoders: " + format
-                );
+                if (!written) {
+                    throw new InvalidImageException(
+                            "Output format is not supported by the installed image encoders: " + format
+                    );
+                }
+            } finally {
+                if (convertedBmp) {
+                    imageToWrite.flush();
+                }
             }
 
             return baos.toByteArray();

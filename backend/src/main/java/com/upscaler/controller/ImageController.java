@@ -52,7 +52,8 @@ public class ImageController {
             originalName = originalName.substring(originalName.lastIndexOf('/') + 1);
         }
         String baseName = originalName.contains(".") ? originalName.substring(0, originalName.lastIndexOf('.')) : originalName;
-        String sanitizedBaseName = baseName.replaceAll("[^a-zA-Z0-9._-]", "_");
+        String sanitizedBaseName = baseName.replaceAll("[^a-zA-Z0-9._-]", "_")
+                .replaceAll("^\\.+", "");
         if (sanitizedBaseName.isBlank()) {
             sanitizedBaseName = "image";
         }
