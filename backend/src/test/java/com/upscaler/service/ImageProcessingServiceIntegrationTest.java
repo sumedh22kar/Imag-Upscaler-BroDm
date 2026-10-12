@@ -141,6 +141,44 @@ class ImageProcessingServiceIntegrationTest {
     }
 
     @Test
+    @DisplayName("Classic Pro Lanczos resampling produces valid PNG with correct dimensions")
+    void testClassicProLanczosProducesValidPng() throws Exception {
+        byte[] inputBytes = createPngBytes(32, 32, true);
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "classic-pro-test.png", "image/png", inputBytes);
+
+        UpscaleSettingsRequest settings = new UpscaleSettingsRequest();
+        settings.setScaleFactor(2);
+        settings.setOutputFormat("PNG");
+        settings.setDpi(300);
+        settings.setModel("classic_pro");
+        settings.setSharpenLevel(0);
+
+        ImageProcessingService.ProcessedImageResult result =
+                imageProcessingService.processImage(file, settings);
+
+        assertNotNull(result);
+        assertEquals("image/png", result.mimeType());
+        assertEquals(64, result.response().getTargetWidth());
+        assertEquals(64, result.response().getTargetHeight());
+        assertEquals("PNG", result.response().getOutputFormat());
+        assertEquals("classic_pro", result.response().getModel());
+
+        BufferedImage output = ImageIO.read(
+                new ByteArrayInputStream(result.imageBytes()));
+
+        assertNotNull(output, "Output must be a readable PNG");
+        assertEquals(64, output.getWidth());
+        assertEquals(64, output.getHeight());
+
+        // The fixture has a transparent top half.
+        assertEquals(0, (output.getRGB(10, 5) >>> 24) & 0xFF,
+                "Transparent area should remain transparent");
+
+        output.flush();
+    }
+
+    @Test
     @DisplayName("Service upscale PNG -> JPEG scales dimensions, converts alpha to white, and writes JFIF 300 DPI")
     void testProcessImagePngToJpeg_dimensionsWhiteBackgroundAndDpi() throws Exception {
         byte[] inputBytes = createPngBytes(32, 32, true);

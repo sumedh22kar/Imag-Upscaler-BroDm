@@ -12,6 +12,7 @@ const initialSettings = {
   outputFormat: "PNG",
   dpi: "300",
   quality: 95,
+  model: "bicubic",
   maintainAspectRatio: true,
 };
 
@@ -667,13 +668,16 @@ function App() {
     try {
       const form = new FormData();
       form.append("file", file);
-      form.append("scaleFactor", settings.scaleFactor);
+      form.append(
+        "scaleFactor",
+        settings.model === "ai_pro" ? "4" : settings.scaleFactor
+      );
       form.append("targetWidth", settings.targetWidth);
       form.append("targetHeight", settings.targetHeight);
       form.append("outputFormat", settings.outputFormat);
       form.append("dpi", settings.dpi);
       form.append("quality", String(settings.quality));
-      form.append("model", "bicubic");
+      form.append("model", settings.model || "bicubic");
       form.append("denoiseLevel", "0");
       form.append("sharpenLevel", "0");
       form.append(
@@ -1067,20 +1071,97 @@ function App() {
                   { value: "2", label: "2×", desc: "Double (200%)" },
                   { value: "4", label: "4×", desc: "Quadruple (400%)" },
                   { value: "8", label: "8×", desc: "Max (800%)" },
-                ].map((item) => (
+                ].map((item) => {
+                  const baseW = dimensions.width;
+                  const baseH = dimensions.height;
+                  const scale = Number(item.value);
+
+                  const predictedW = Math.round(baseW * scale);
+                  const predictedH = Math.round(baseH * scale);
+
+                  const exceedsLimit =
+                    baseW > 0 &&
+                    baseH > 0 &&
+                    (predictedW > 8192 || predictedH > 8192);
+
+                  return (
+                    <button
+                      key={item.value}
+                      type="button"
+                      className={`scale-option ${settings.scaleFactor === item.value ? "selected" : ""}`}
+                      onClick={() => changeScale(item.value)}
+                      disabled={busy}
+                      title={
+                        exceedsLimit
+                          ? `Produces ${predictedW} × ${predictedH} px; maximum is 8192 × 8192 px`
+                          : `${predictedW || "—"} × ${predictedH || "—"} px`
+                      }
+                    >
+                      <strong>{item.label}</strong>
+                      <span>{item.desc}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {dimensions.width > 0 &&
+                dimensions.height > 0 &&
+                (Math.round(dimensions.width * Number(settings.scaleFactor)) > 8192 ||
+                  Math.round(dimensions.height * Number(settings.scaleFactor)) > 8192) && (
+                  <p className="field-hint" role="alert">
+                    This scale exceeds the 8192 × 8192 px backend limit.
+                    Choose a smaller multiplier or use Custom Pixels.
+                    Current target: {settings.targetWidth} × {settings.targetHeight} px.
+                  </p>
+                )}
+            </>
+          )}
+
+          {/* Quick Resolution Presets */}
+          {settings.model === "ai_pro" && (
+            <div className="resolution-presets">
+              <label className="field-label">Quick Resolution Presets</label>
+
+              <div className="scale-options">
+                {[
+                  { label: "Full HD", width: 1920, height: 1080 },
+                  { label: "4K UHD", width: 3840, height: 2160 },
+                  { label: "8K UHD", width: 7680, height: 4320 },
+                ].map((preset) => (
                   <button
-                    key={item.value}
+                    key={preset.label}
                     type="button"
-                    className={`scale-option ${settings.scaleFactor === item.value ? "selected" : ""}`}
-                    onClick={() => changeScale(item.value)}
+                    className={`scale-option ${
+                      Number(settings.targetWidth) === preset.width &&
+                      Number(settings.targetHeight) === preset.height
+                        ? "selected"
+                        : ""
+                    }`}
                     disabled={busy}
+                    onClick={() => {
+                      setSizingMode("custom");
+                      setAspectRatioLocked(false);
+                      setSettings((old) => ({
+                        ...old,
+                        targetWidth: String(preset.width),
+                        targetHeight: String(preset.height),
+                      }));
+                      setResult(null);
+                      setError("");
+                    }}
+                    title={`${preset.width} × ${preset.height} pixels`}
                   >
-                    <strong>{item.label}</strong>
-                    <span>{item.desc}</span>
+                    <strong>{preset.label}</strong>
+                    <span>{preset.width} × {preset.height}</span>
                   </button>
                 ))}
               </div>
-            </>
+
+              <p className="field-hint">
+                Presets use exact pixel dimensions. The image may be stretched if its
+                original aspect ratio differs from the selected preset.
+              </p>
+            </div>
           )}
 
           {/* Mode 2: Custom Dimensions with Aspect Ratio Lock */}
@@ -1265,6 +1346,29 @@ function App() {
               )}
             </div>
           )}
+
+          {/* Resampling Method */}
+          <div className="field-row">
+            <label>
+              Resampling method
+              <select
+                value={settings.model}
+                disabled={busy}
+                onChange={(event) =>
+                  updateSetting("model", event.target.value)
+                }
+              >
+                <option value="bicubic">Bicubic — Standard</option>
+                <option value="classic_pro">Classic Pro — Lanczos</option>
+                <option value="ai_pro">AI Pro — Real-ESRGAN (4×)</option>
+              </select>
+              <small className="field-hint">
+                Bicubic uses standard image resampling. Classic Pro uses Lanczos
+                resampling. AI Pro uses Real-ESRGAN to reconstruct image details
+                and generate a 4× upscaled image.
+              </small>
+            </label>
+          </div>
 
           {/* Dimension Fitting Mode (Preserve Aspect vs Exact Dimensions) */}
           <div className="fit-mode-section">

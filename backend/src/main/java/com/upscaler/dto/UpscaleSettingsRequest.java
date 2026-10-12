@@ -32,7 +32,10 @@ public class UpscaleSettingsRequest {
     @Max(value = 1200, message = "DPI cannot exceed 1200")
     private Integer dpi = 300;
 
-    @Pattern(regexp = "(?i)^(standard|ultra_sharp|anime|cinematic|art|bicubic)$", message = "Model must be one of: standard, ultra_sharp, anime, cinematic, art, bicubic")
+    @Pattern(
+            regexp = "(?i)^(standard|ultra_sharp|anime|cinematic|art|bicubic|classic_pro|ai_pro)$",
+            message = "Model must be one of: standard, ultra_sharp, anime, cinematic, art, bicubic, classic_pro, ai_pro"
+    )
     private String model = "standard";
 
     @Min(value = 0, message = "Denoise level must be at least 0")

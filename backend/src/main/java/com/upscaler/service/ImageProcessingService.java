@@ -35,6 +35,12 @@ import java.util.concurrent.TimeUnit;
 @Service
 public class ImageProcessingService {
 
+    private final RealEsrganService realEsrganService;
+
+    public ImageProcessingService(RealEsrganService realEsrganService) {
+        this.realEsrganService = realEsrganService;
+    }
+
     @Value("${upscaler.image.max-width:8192}")
     private int maxWidthLimit;
 
@@ -155,9 +161,53 @@ public class ImageProcessingService {
                         ));
                     }
 
-                    // Calculate and validate target dimensions before allocating scaled buffers
-                    Dimension targetDim = calculateTargetDimensions(origWidth, origHeight, settings);
-                    validateTargetDimensions(targetDim.width, targetDim.height);
+                    // Calculate target dimensions before allocating image buffers.
+                    Dimension targetDim;
+                    int aiScale = 4;
+
+                    boolean useAiPro =
+                            "ai_pro".equalsIgnoreCase(settings.getModel());
+
+                    if (useAiPro) {
+                        aiScale = selectAiScale(origWidth, origHeight);
+
+                        long aiWidth = (long) origWidth * aiScale;
+                        long aiHeight = (long) origHeight * aiScale;
+
+                        boolean hasCustomTarget =
+                                settings.getTargetWidth() != null
+                                || settings.getTargetHeight() != null;
+
+                        if (hasCustomTarget) {
+                            targetDim = calculateTargetDimensions(
+                                    origWidth, origHeight, settings
+                            );
+                        } else {
+                            targetDim = new Dimension((int) aiWidth, (int) aiHeight);
+                        }
+                    } else {
+                        targetDim = calculateTargetDimensions(
+                                origWidth, origHeight, settings
+                        );
+                    }
+
+                    validateTargetDimensions(
+                            targetDim.width, targetDim.height
+                    );
+
+                    // Route AI Pro before decoding the full source image.
+                    if (useAiPro) {
+                        return processAiProImage(
+                                file,
+                                settings,
+                                origWidth,
+                                origHeight,
+                                targetDim.width,
+                                targetDim.height,
+                                aiScale,
+                                startTime
+                        );
+                    }
 
                     inputImage = reader.read(0);
                 } finally {
@@ -194,27 +244,95 @@ public class ImageProcessingService {
             boolean hasAlpha = inputImage.getColorModel().hasAlpha() && !targetFormat.equals("JPEG") && !targetFormat.equals("BMP");
             int imageType = hasAlpha ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
 
-            scaledImage = new BufferedImage(targetWidth, targetHeight, imageType);
-            Graphics2D g2d = scaledImage.createGraphics();
+            boolean useClassicPro =
+                    "classic_pro".equalsIgnoreCase(settings.getModel());
 
-            try {
-                g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
-                g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-                g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                g2d.setRenderingHint(RenderingHints.KEY_COLOR_RENDERING, RenderingHints.VALUE_COLOR_RENDER_QUALITY);
-                g2d.setRenderingHint(RenderingHints.KEY_DITHERING, RenderingHints.VALUE_DITHER_ENABLE);
+            if (useClassicPro) {
+                BufferedImage resampledImage = null;
 
-                if (!hasAlpha) {
-                    g2d.setColor(Color.WHITE);
-                    g2d.fillRect(0, 0, targetWidth, targetHeight);
+                try {
+                    resampledImage = LanczosResampler.resize(
+                            inputImage, targetWidth, targetHeight);
+
+                    if (resampledImage == inputImage) {
+                        scaledImage = new BufferedImage(
+                                targetWidth, targetHeight, imageType);
+
+                        Graphics2D g2d = scaledImage.createGraphics();
+                        try {
+                            if (!hasAlpha) {
+                                g2d.setColor(Color.WHITE);
+                                g2d.fillRect(0, 0, targetWidth, targetHeight);
+                            }
+
+                            g2d.drawImage(resampledImage, 0, 0, null);
+                        } finally {
+                            g2d.dispose();
+                        }
+                    } else if (resampledImage.getType() == imageType) {
+                        scaledImage = resampledImage;
+                    } else {
+                        scaledImage = new BufferedImage(
+                                targetWidth, targetHeight, imageType);
+
+                        Graphics2D g2d = scaledImage.createGraphics();
+                        try {
+                            if (!hasAlpha) {
+                                g2d.setColor(Color.WHITE);
+                                g2d.fillRect(
+                                        0, 0, targetWidth, targetHeight);
+                            }
+                            g2d.drawImage(
+                                    resampledImage, 0, 0, null);
+                        } finally {
+                            g2d.dispose();
+                            resampledImage.flush();
+                        }
+                    }
+                } finally {
+                    if (inputImage != null) {
+                        inputImage.flush();
+                        inputImage = null;
+                    }
                 }
+            } else {
+                scaledImage = new BufferedImage(
+                        targetWidth, targetHeight, imageType);
+                Graphics2D g2d = scaledImage.createGraphics();
 
-                g2d.drawImage(inputImage, 0, 0, targetWidth, targetHeight, null);
-            } finally {
-                g2d.dispose();
-                if (inputImage != null) {
-                    inputImage.flush();
-                    inputImage = null;
+                try {
+                    g2d.setRenderingHint(
+                            RenderingHints.KEY_INTERPOLATION,
+                            RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                    g2d.setRenderingHint(
+                            RenderingHints.KEY_RENDERING,
+                            RenderingHints.VALUE_RENDER_QUALITY);
+                    g2d.setRenderingHint(
+                            RenderingHints.KEY_ANTIALIASING,
+                            RenderingHints.VALUE_ANTIALIAS_ON);
+                    g2d.setRenderingHint(
+                            RenderingHints.KEY_COLOR_RENDERING,
+                            RenderingHints.VALUE_COLOR_RENDER_QUALITY);
+                    g2d.setRenderingHint(
+                            RenderingHints.KEY_DITHERING,
+                            RenderingHints.VALUE_DITHER_ENABLE);
+
+                    if (!hasAlpha) {
+                        g2d.setColor(Color.WHITE);
+                        g2d.fillRect(
+                                0, 0, targetWidth, targetHeight);
+                    }
+
+                    g2d.drawImage(
+                            inputImage, 0, 0,
+                            targetWidth, targetHeight, null);
+                } finally {
+                    g2d.dispose();
+
+                    if (inputImage != null) {
+                        inputImage.flush();
+                        inputImage = null;
+                    }
                 }
             }
 
@@ -276,6 +394,156 @@ public class ImageProcessingService {
             }
             if (scaledImage != null) {
                 scaledImage.flush();
+            }
+        }
+    }
+
+    private int selectAiScale(int originalWidth, int originalHeight) {
+        int longestSide = Math.max(originalWidth, originalHeight);
+
+        if (longestSide <= 2048) {
+            return 4;
+        }
+        if (longestSide <= 2730) {
+            return 3;
+        }
+        if (longestSide <= 4096) {
+            return 2;
+        }
+
+        throw new InvalidImageException(
+                "AI Pro currently supports images up to 4096 pixels on the longest side."
+        );
+    }
+
+    private ProcessedImageResult processAiProImage(
+            MultipartFile file,
+            UpscaleSettingsRequest settings,
+            int origWidth,
+            int origHeight,
+            int targetWidth,
+            int targetHeight,
+            int aiScale,
+            long startTime
+    ) {
+        byte[] aiPngBytes = realEsrganService.upscale(
+                file, origWidth, origHeight, aiScale
+        );
+
+        BufferedImage aiImage = null;
+
+        try {
+            aiImage = ImageIO.read(
+                    new ByteArrayInputStream(aiPngBytes)
+            );
+
+            if (aiImage == null) {
+                throw new InvalidImageException(
+                        "Could not decode the Real-ESRGAN output."
+                );
+            }
+
+            if (aiImage.getWidth() != targetWidth
+                    || aiImage.getHeight() != targetHeight) {
+
+                BufferedImage resizedImage = LanczosResampler.resize(
+                        aiImage,
+                        targetWidth,
+                        targetHeight
+                );
+
+                if (resizedImage == null
+                        || resizedImage.getWidth() != targetWidth
+                        || resizedImage.getHeight() != targetHeight) {
+                    if (resizedImage != null && resizedImage != aiImage) {
+                        resizedImage.flush();
+                    }
+
+                    throw new InvalidImageException(
+                            "Could not resize AI output to the requested dimensions."
+                    );
+                }
+
+                if (resizedImage != aiImage) {
+                    aiImage.flush();
+                    aiImage = resizedImage;
+                }
+            }
+
+            String targetFormat = settings.getOutputFormat() != null
+                    ? settings.getOutputFormat().toUpperCase(
+                            java.util.Locale.ROOT
+                    )
+                    : "PNG";
+
+            if ("JPG".equals(targetFormat)) {
+                targetFormat = "JPEG";
+            }
+            if ("TIF".equals(targetFormat)) {
+                targetFormat = "TIFF";
+            }
+
+            int targetDpi = settings.getDpi() != null
+                    && settings.getDpi() >= 72
+                    && settings.getDpi() <= 1200
+                    ? settings.getDpi()
+                    : 300;
+
+            byte[] outputBytes = encodeImage(
+                    aiImage,
+                    targetFormat,
+                    settings.getQuality(),
+                    targetDpi
+            );
+
+            String mimeType = switch (targetFormat) {
+                case "JPEG" -> "image/jpeg";
+                case "WEBP" -> "image/webp";
+                case "BMP" -> "image/bmp";
+                case "TIFF" -> "image/tiff";
+                default -> "image/png";
+            };
+
+            String dataUrl = "data:" + mimeType + ";base64,"
+                    + Base64.getEncoder().encodeToString(outputBytes);
+
+            ImageUploadResponse response = new ImageUploadResponse();
+            response.setOriginalFilename(file.getOriginalFilename());
+            response.setContentType(file.getContentType());
+            response.setOriginalSizeBytes(file.getSize());
+            response.setOriginalWidth(origWidth);
+            response.setOriginalHeight(origHeight);
+            response.setTargetWidth(targetWidth);
+            response.setTargetHeight(targetHeight);
+            response.setScaleFactor(4);
+            response.setOutputFormat(targetFormat);
+            response.setDpi(targetDpi);
+            response.setOutputSizeBytes(outputBytes.length);
+            response.setProcessingDurationMs(
+                    System.currentTimeMillis() - startTime
+            );
+            response.setModel("ai_pro");
+            response.setDataUrl(dataUrl);
+            response.setMessage(String.format(
+                    "AI upscaled image from %dx%d to %dx%d (%s, %d DPI)",
+                    origWidth,
+                    origHeight,
+                    targetWidth,
+                    targetHeight,
+                    targetFormat,
+                    targetDpi
+            ));
+
+            return new ProcessedImageResult(
+                    response, outputBytes, mimeType
+            );
+        } catch (IOException e) {
+            throw new InvalidImageException(
+                    "Could not decode the Real-ESRGAN output.", e
+            );
+        } finally {
+            if (aiImage != null) {
+                aiImage.flush();
             }
         }
     }

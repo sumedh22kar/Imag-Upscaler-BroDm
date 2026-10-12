@@ -94,7 +94,8 @@ public class ImageController {
     public ResponseEntity<Map<String, Object>> getConfig() {
         Map<String, Object> config = new LinkedHashMap<>();
         config.put("supportedFormats", List.of("PNG", "JPEG", "WEBP", "BMP", "TIFF"));
-        config.put("supportedModels", List.of("standard", "bicubic", "ultra_sharp"));
+        config.put("supportedModels",
+                List.of("standard", "bicubic", "ultra_sharp", "classic_pro"));
         config.put("minDimension", 16);
         config.put("maxDimension", 8192);
         config.put("maxScaleFactor", 8);

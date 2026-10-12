@@ -425,6 +425,57 @@ describe("PixelPerfect App", () => {
       expect(screen.getByText(/Custom Pixel Dimensions/i)).toBeInTheDocument();
     });
 
+    it("shows resolution presets only when AI Pro is selected", async () => {
+      render(<App />);
+
+      const modelSelect = screen.getByLabelText(/Resampling method/i);
+
+      // Default model is Bicubic: presets should be hidden.
+      expect(
+        screen.queryByRole("button", { name: /8K UHD/i })
+      ).not.toBeInTheDocument();
+
+      // Classic Pro: presets should remain hidden.
+      await userEvent.selectOptions(modelSelect, "classic_pro");
+
+      expect(
+        screen.queryByRole("button", { name: /8K UHD/i })
+      ).not.toBeInTheDocument();
+
+      // AI Pro: presets should appear.
+      await userEvent.selectOptions(modelSelect, "ai_pro");
+
+      expect(
+        await screen.findByRole("button", { name: /8K UHD/i })
+      ).toBeInTheDocument();
+
+      expect(
+        screen.getByRole("button", { name: /Full HD/i })
+      ).toBeInTheDocument();
+
+      expect(
+        screen.getByRole("button", { name: /4K UHD/i })
+      ).toBeInTheDocument();
+    });
+
+    it("selects the 8K UHD preset and sets exact target dimensions in AI Pro", async () => {
+      render(<App />);
+
+      const modelSelect = screen.getByLabelText(/Resampling method/i);
+      await userEvent.selectOptions(modelSelect, "ai_pro");
+
+      const presetButton = await screen.findByRole("button", {
+        name: /8K UHD/i,
+      });
+
+      await userEvent.click(presetButton);
+
+      await waitFor(() => {
+        expect(screen.getByDisplayValue("7680")).toBeInTheDocument();
+        expect(screen.getByDisplayValue("4320")).toBeInTheDocument();
+      });
+    });
+
     it("shows aspect ratio lock toggle in custom mode", async () => {
       render(<App />);
       const customTab = screen.getByText("Custom Pixels");

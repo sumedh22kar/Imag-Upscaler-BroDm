@@ -1,43 +1,54 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap");
 
 :root {
-  /* Strict Monochrome Design Tokens */
+  /* Strict High-Contrast Monochrome Design Tokens */
   --color-black: #000000;
   --color-white: #ffffff;
-  --color-gray-950: #0a0a0a;
-  --color-gray-900: #121212;
-  --color-gray-800: #1e1e1e;
-  --color-gray-700: #2e2e2e;
-  --color-gray-600: #4a4a4a;
-  --color-gray-500: #6b6b6b;
-  --color-gray-400: #949494;
-  --color-gray-300: #c7c7c7;
-  --color-gray-200: #e5e5e5;
-  --color-gray-150: #ececec;
-  --color-gray-100: #f4f4f4;
-  --color-gray-50: #fafafa;
+  --color-dark-bg: #000000;
+  --color-dark-surface: #0a0a0c;
+  --color-dark-border: rgba(255, 255, 255, 0.14);
+  --color-dark-muted: #8e8e93;
 
-  /* Semantic Layout Tokens */
-  --bg-app: #fafafa;
-  --bg-surface: #ffffff;
-  --bg-surface-alt: #f5f5f5;
-  --bg-surface-inset: #eeeeee;
-  --border-subtle: #e5e5e5;
-  --border-medium: #c7c7c7;
-  --border-strong: #121212;
+  /* Card Interior Tokens (Pure Crisp White Card) */
+  --bg-card: #ffffff;
+  --bg-card-subtle: #f8fafc;
+  --bg-card-inset: #f1f5f9;
+  --border-card: #e2e8f0;
+  --border-card-medium: #cbd5e1;
+  --border-card-dark: #000000;
 
-  --text-primary: #121212;
-  --text-secondary: #4a4a4a;
-  --text-muted: #6b6b6b;
-  --text-inverse: #ffffff;
+  --text-on-card-primary: #09090b;
+  --text-on-card-secondary: #334155;
+  --text-on-card-muted: #64748b;
 
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
+  /* Page Canvas (Velvety Pitch Black) */
+  --bg-app: #000000;
+  --text-page-title: #ffffff;
+  --text-page-subtitle: #a1a1aa;
+  --text-page-muted: #71717a;
+
+  /* Semantic Aliases for Component Reuse */
+  --bg-surface: var(--bg-card);
+  --bg-surface-alt: var(--bg-card-subtle);
+  --bg-surface-inset: var(--bg-card-inset);
+  --border-subtle: var(--border-card);
+  --border-medium: var(--border-card-medium);
+  --border-strong: var(--border-card-dark);
+
+  --text-primary: var(--text-on-card-primary);
+  --text-secondary: var(--text-on-card-secondary);
+  --text-muted: var(--text-on-card-muted);
+  --text-inverse: var(--color-white);
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
   --radius-full: 9999px;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.05);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.08);
+  --shadow-white-card: 0 24px 60px -15px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.16);
+  --shadow-black-btn: 0 6px 18px rgba(0, 0, 0, 0.3);
 
   font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   color: var(--text-primary);
@@ -55,14 +66,19 @@
 html {
   min-width: 320px;
   min-height: 100%;
+  background-color: #000000;
 }
 
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: var(--bg-app);
-  color: var(--text-primary);
+  background-color: #000000;
+  background-image: 
+    radial-gradient(circle at 50% -8%, rgba(255, 255, 255, 0.1) 0%, transparent 55%),
+    linear-gradient(180deg, #09090b 0%, #000000 100%);
+  background-attachment: fixed;
+  color: #f4f4f5;
 }
 
 button,
@@ -82,8 +98,8 @@ select:focus-visible,
 }
 
 ::selection {
-  background: var(--color-black);
-  color: var(--color-white);
+  background: var(--color-white);
+  color: var(--color-black);
 }
 
 @media (prefers-reduced-motion: reduce) {
