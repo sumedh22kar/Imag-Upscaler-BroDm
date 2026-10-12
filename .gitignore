@@ -69,3 +69,9 @@ converted_*.tiff
 **/playwright-report/
 **/test-results/
 
+# Local Real-ESRGAN engine binaries and model files
+/ai-engine/
+/ai-engine-v025/
+
+# Generated AI test response may contain Base64 image data
+/ai-pro-response.json

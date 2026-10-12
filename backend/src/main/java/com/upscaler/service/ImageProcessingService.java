@@ -35,6 +35,12 @@ import java.util.concurrent.TimeUnit;
 @Service
 public class ImageProcessingService {
 
+    private final RealEsrganService realEsrganService;
+
+    public ImageProcessingService(RealEsrganService realEsrganService) {
+        this.realEsrganService = realEsrganService;
+    }
+
     @Value("${upscaler.image.max-width:8192}")
     private int maxWidthLimit;
 
@@ -155,9 +161,60 @@ public class ImageProcessingService {
                         ));
                     }
 
-                    // Calculate and validate target dimensions before allocating scaled buffers
-                    Dimension targetDim = calculateTargetDimensions(origWidth, origHeight, settings);
-                    validateTargetDimensions(targetDim.width, targetDim.height);
+                    // Calculate target dimensions before allocating image buffers.
+                    Dimension targetDim;
+
+                    boolean useAiPro =
+                            "ai_pro".equalsIgnoreCase(settings.getModel());
+
+                    if (useAiPro) {
+                        if (settings.getTargetWidth() != null
+                                || settings.getTargetHeight() != null) {
+                            throw new InvalidImageException(
+                                    "AI Pro currently supports fixed 4x output only. "
+                                    + "Clear custom target dimensions and use AI Pro."
+                            );
+                        }
+
+                        long aiWidth = (long) origWidth * 4;
+                        long aiHeight = (long) origHeight * 4;
+
+                        if (aiWidth > maxWidthLimit
+                                || aiHeight > maxHeightLimit) {
+                            throw new InvalidImageException(
+                                    "The 4x AI output exceeds the maximum "
+                                    + "supported dimensions of "
+                                    + maxWidthLimit + "x" + maxHeightLimit
+                                    + " pixels."
+                            );
+                        }
+
+                        targetDim = new Dimension(
+                                (int) aiWidth,
+                                (int) aiHeight
+                        );
+                    } else {
+                        targetDim = calculateTargetDimensions(
+                                origWidth, origHeight, settings
+                        );
+                    }
+
+                    validateTargetDimensions(
+                            targetDim.width, targetDim.height
+                    );
+
+                    // Route AI Pro before decoding the full source image.
+                    if (useAiPro) {
+                        return processAiProImage(
+                                file,
+                                settings,
+                                origWidth,
+                                origHeight,
+                                targetDim.width,
+                                targetDim.height,
+                                startTime
+                        );
+                    }
 
                     inputImage = reader.read(0);
                 } finally {
@@ -344,6 +401,117 @@ public class ImageProcessingService {
             }
             if (scaledImage != null) {
                 scaledImage.flush();
+            }
+        }
+    }
+
+    private ProcessedImageResult processAiProImage(
+            MultipartFile file,
+            UpscaleSettingsRequest settings,
+            int origWidth,
+            int origHeight,
+            int targetWidth,
+            int targetHeight,
+            long startTime
+    ) {
+        byte[] aiPngBytes = realEsrganService.upscale(
+                file, origWidth, origHeight
+        );
+
+        BufferedImage aiImage = null;
+
+        try {
+            aiImage = ImageIO.read(
+                    new ByteArrayInputStream(aiPngBytes)
+            );
+
+            if (aiImage == null) {
+                throw new InvalidImageException(
+                        "Could not decode the Real-ESRGAN output."
+                );
+            }
+
+            if (aiImage.getWidth() != targetWidth
+                    || aiImage.getHeight() != targetHeight) {
+                throw new InvalidImageException(
+                        "AI output dimensions do not match the expected 4x dimensions."
+                );
+            }
+
+            String targetFormat = settings.getOutputFormat() != null
+                    ? settings.getOutputFormat().toUpperCase(
+                            java.util.Locale.ROOT
+                    )
+                    : "PNG";
+
+            if ("JPG".equals(targetFormat)) {
+                targetFormat = "JPEG";
+            }
+            if ("TIF".equals(targetFormat)) {
+                targetFormat = "TIFF";
+            }
+
+            int targetDpi = settings.getDpi() != null
+                    && settings.getDpi() >= 72
+                    && settings.getDpi() <= 1200
+                    ? settings.getDpi()
+                    : 300;
+
+            byte[] outputBytes = encodeImage(
+                    aiImage,
+                    targetFormat,
+                    settings.getQuality(),
+                    targetDpi
+            );
+
+            String mimeType = switch (targetFormat) {
+                case "JPEG" -> "image/jpeg";
+                case "WEBP" -> "image/webp";
+                case "BMP" -> "image/bmp";
+                case "TIFF" -> "image/tiff";
+                default -> "image/png";
+            };
+
+            String dataUrl = "data:" + mimeType + ";base64,"
+                    + Base64.getEncoder().encodeToString(outputBytes);
+
+            ImageUploadResponse response = new ImageUploadResponse();
+            response.setOriginalFilename(file.getOriginalFilename());
+            response.setContentType(file.getContentType());
+            response.setOriginalSizeBytes(file.getSize());
+            response.setOriginalWidth(origWidth);
+            response.setOriginalHeight(origHeight);
+            response.setTargetWidth(targetWidth);
+            response.setTargetHeight(targetHeight);
+            response.setScaleFactor(4);
+            response.setOutputFormat(targetFormat);
+            response.setDpi(targetDpi);
+            response.setOutputSizeBytes(outputBytes.length);
+            response.setProcessingDurationMs(
+                    System.currentTimeMillis() - startTime
+            );
+            response.setModel("ai_pro");
+            response.setDataUrl(dataUrl);
+            response.setMessage(String.format(
+                    "AI upscaled image from %dx%d to %dx%d (%s, %d DPI)",
+                    origWidth,
+                    origHeight,
+                    targetWidth,
+                    targetHeight,
+                    targetFormat,
+                    targetDpi
+            ));
+
+            return new ProcessedImageResult(
+                    response, outputBytes, mimeType
+            );
+        } catch (IOException e) {
+            throw new InvalidImageException(
+                    "Could not decode the Real-ESRGAN output.", e
+            );
+        } finally {
+            if (aiImage != null) {
+                aiImage.flush();
             }
         }
     }

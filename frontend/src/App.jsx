@@ -1310,11 +1310,12 @@ function App() {
               >
                 <option value="bicubic">Bicubic — Standard</option>
                 <option value="classic_pro">Classic Pro — Lanczos</option>
+                <option value="ai_pro">AI Pro — Real-ESRGAN (4×)</option>
               </select>
               <small className="field-hint">
-                Classic Pro uses traditional Lanczos resampling. It can
-                preserve edges differently from Bicubic, but it does not
-                reconstruct missing image details using AI.
+                Bicubic uses standard image resampling. Classic Pro uses Lanczos
+                resampling. AI Pro uses Real-ESRGAN to reconstruct image details
+                and generate a 4× upscaled image.
               </small>
             </label>
           </div>
