@@ -163,13 +163,16 @@ public class ImageProcessingService {
 
                     // Calculate target dimensions before allocating image buffers.
                     Dimension targetDim;
+                    int aiScale = 4;
 
                     boolean useAiPro =
                             "ai_pro".equalsIgnoreCase(settings.getModel());
 
                     if (useAiPro) {
-                        long aiWidth = (long) origWidth * 4;
-                        long aiHeight = (long) origHeight * 4;
+                        aiScale = selectAiScale(origWidth, origHeight);
+
+                        long aiWidth = (long) origWidth * aiScale;
+                        long aiHeight = (long) origHeight * aiScale;
 
                         boolean hasCustomTarget =
                                 settings.getTargetWidth() != null
@@ -180,13 +183,6 @@ public class ImageProcessingService {
                                     origWidth, origHeight, settings
                             );
                         } else {
-                            if (aiWidth > maxWidthLimit || aiHeight > maxHeightLimit) {
-                                throw new InvalidImageException(
-                                        "The 4x AI output exceeds the maximum supported dimensions of "
-                                                + maxWidthLimit + "x" + maxHeightLimit + " pixels."
-                                );
-                            }
-
                             targetDim = new Dimension((int) aiWidth, (int) aiHeight);
                         }
                     } else {
@@ -208,6 +204,7 @@ public class ImageProcessingService {
                                 origHeight,
                                 targetDim.width,
                                 targetDim.height,
+                                aiScale,
                                 startTime
                         );
                     }
@@ -401,6 +398,24 @@ public class ImageProcessingService {
         }
     }
 
+    private int selectAiScale(int originalWidth, int originalHeight) {
+        int longestSide = Math.max(originalWidth, originalHeight);
+
+        if (longestSide <= 2048) {
+            return 4;
+        }
+        if (longestSide <= 2730) {
+            return 3;
+        }
+        if (longestSide <= 4096) {
+            return 2;
+        }
+
+        throw new InvalidImageException(
+                "AI Pro currently supports images up to 4096 pixels on the longest side."
+        );
+    }
+
     private ProcessedImageResult processAiProImage(
             MultipartFile file,
             UpscaleSettingsRequest settings,
@@ -408,10 +423,11 @@ public class ImageProcessingService {
             int origHeight,
             int targetWidth,
             int targetHeight,
+            int aiScale,
             long startTime
     ) {
         byte[] aiPngBytes = realEsrganService.upscale(
-                file, origWidth, origHeight
+                file, origWidth, origHeight, aiScale
         );
 
         BufferedImage aiImage = null;

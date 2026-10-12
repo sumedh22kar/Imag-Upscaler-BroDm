@@ -44,8 +44,15 @@ public class RealEsrganService {
     public byte[] upscale(
             MultipartFile file,
             int originalWidth,
-            int originalHeight
+            int originalHeight,
+            int scale
     ) {
+        if (scale != 2 && scale != 3 && scale != 4) {
+            throw new InvalidImageException(
+                    "AI scale must be 2, 3, or 4."
+            );
+        }
+
         if (!enabled) {
             throw new InvalidImageException(
                     "AI Pro is not enabled on this server."
@@ -84,7 +91,7 @@ public class RealEsrganService {
                     "-i", inputPath.toString(),
                     "-o", outputPath.toString(),
                     "-n", "realesrgan-x4plus",
-                    "-s", "4",
+                    "-s", Integer.toString(scale),
                     "-m", modelsPath.toString(),
                     "-g", Integer.toString(gpuId),
                     "-t", Integer.toString(tileSize),
@@ -135,7 +142,8 @@ public class RealEsrganService {
             validateOutputImage(
                     outputPath,
                     originalWidth,
-                    originalHeight
+                    originalHeight,
+                    scale
             );
 
             return Files.readAllBytes(outputPath);
@@ -207,7 +215,8 @@ public class RealEsrganService {
     private void validateOutputImage(
             Path outputPath,
             int originalWidth,
-            int originalHeight
+            int originalHeight,
+            int scale
     ) throws IOException {
         try (ImageInputStream input =
                      ImageIO.createImageInputStream(outputPath.toFile())) {
@@ -234,12 +243,12 @@ public class RealEsrganService {
                 int width = reader.getWidth(0);
                 int height = reader.getHeight(0);
 
-                long expectedWidth = (long) originalWidth * 4;
-                long expectedHeight = (long) originalHeight * 4;
+                long expectedWidth = (long) originalWidth * scale;
+                long expectedHeight = (long) originalHeight * scale;
 
                 if (expectedWidth > 8192 || expectedHeight > 8192) {
                     throw new InvalidImageException(
-                            "The 4× AI output would exceed the 8192-pixel limit."
+                            "The AI output would exceed the 8192-pixel limit."
                     );
                 }
 

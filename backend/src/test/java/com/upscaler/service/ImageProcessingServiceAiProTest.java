@@ -1,9 +1,11 @@
 package com.upscaler.service;
 
 import com.upscaler.dto.UpscaleSettingsRequest;
+import com.upscaler.exception.InvalidImageException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import javax.imageio.ImageIO;
 import java.awt.Color;
@@ -12,11 +14,10 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 
-import org.springframework.test.util.ReflectionTestUtils;
-
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 class ImageProcessingServiceAiProTest {
@@ -28,10 +29,19 @@ class ImageProcessingServiceAiProTest {
     void setUp() {
         realEsrganService = mock(RealEsrganService.class);
         imageProcessingService = new ImageProcessingService(realEsrganService);
-        ReflectionTestUtils.setField(imageProcessingService, "maxWidthLimit", 8192);
-        ReflectionTestUtils.setField(imageProcessingService, "maxHeightLimit", 8192);
-        ReflectionTestUtils.setField(imageProcessingService, "minWidthLimit", 1);
-        ReflectionTestUtils.setField(imageProcessingService, "minHeightLimit", 1);
+
+        ReflectionTestUtils.setField(
+                imageProcessingService, "maxWidthLimit", 8192
+        );
+        ReflectionTestUtils.setField(
+                imageProcessingService, "maxHeightLimit", 8192
+        );
+        ReflectionTestUtils.setField(
+                imageProcessingService, "minWidthLimit", 1
+        );
+        ReflectionTestUtils.setField(
+                imageProcessingService, "minHeightLimit", 1
+        );
     }
 
     private byte[] createPng(int width, int height) throws Exception {
@@ -39,40 +49,55 @@ class ImageProcessingServiceAiProTest {
                 width, height, BufferedImage.TYPE_INT_RGB
         );
 
-        Graphics2D graphics = image.createGraphics();
-        graphics.setColor(Color.ORANGE);
-        graphics.fillRect(0, 0, width, height);
-        graphics.dispose();
+        try {
+            Graphics2D graphics = image.createGraphics();
+            try {
+                graphics.setColor(Color.ORANGE);
+                graphics.fillRect(0, 0, width, height);
+            } finally {
+                graphics.dispose();
+            }
 
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        ImageIO.write(image, "png", output);
-        image.flush();
-
-        return output.toByteArray();
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            assertTrue(ImageIO.write(image, "png", output));
+            return output.toByteArray();
+        } finally {
+            image.flush();
+        }
     }
 
-    @Test
-    void aiProResizesNativeFourXOutputToRequestedDimensions() throws Exception {
-        byte[] inputBytes = createPng(10, 10);
-        byte[] aiOutputBytes = createPng(40, 40);
-
-        when(realEsrganService.upscale(any(), anyInt(), anyInt()))
-                .thenReturn(aiOutputBytes);
-
-        MockMultipartFile input = new MockMultipartFile(
+    private MockMultipartFile createInput(int width, int height)
+            throws Exception {
+        return new MockMultipartFile(
                 "file",
                 "input.png",
                 "image/png",
-                inputBytes
+                createPng(width, height)
         );
+    }
 
+    private UpscaleSettingsRequest defaultAiProSettings() {
         UpscaleSettingsRequest settings = new UpscaleSettingsRequest();
         settings.setModel("ai_pro");
+        settings.setOutputFormat("PNG");
+        settings.setDpi(300);
+        return settings;
+    }
+
+    @Test
+    void aiProResizesNativeFourXOutputToRequestedDimensions()
+            throws Exception {
+        byte[] aiOutputBytes = createPng(40, 40);
+
+        when(realEsrganService.upscale(any(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(aiOutputBytes);
+
+        MockMultipartFile input = createInput(10, 10);
+
+        UpscaleSettingsRequest settings = defaultAiProSettings();
         settings.setTargetWidth(30);
         settings.setTargetHeight(20);
         settings.setMaintainAspectRatio(false);
-        settings.setOutputFormat("PNG");
-        settings.setDpi(300);
 
         ImageProcessingService.ProcessedImageResult result =
                 imageProcessingService.processImage(input, settings);
@@ -89,12 +114,97 @@ class ImageProcessingServiceAiProTest {
         );
 
         assertNotNull(decoded);
-        assertEquals(30, decoded.getWidth());
-        assertEquals(20, decoded.getHeight());
+        try {
+            assertEquals(30, decoded.getWidth());
+            assertEquals(20, decoded.getHeight());
+        } finally {
+            decoded.flush();
+        }
 
-        decoded.flush();
+        verify(realEsrganService).upscale(any(), eq(10), eq(10), eq(4));
+    }
 
-        verify(realEsrganService, times(1))
-                .upscale(any(), eq(10), eq(10));
+    @Test
+    void selectsFourXForSmallImages() throws Exception {
+        when(realEsrganService.upscale(any(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(createPng(400, 200));
+
+        ImageProcessingService.ProcessedImageResult result =
+                imageProcessingService.processImage(
+                        createInput(100, 50),
+                        defaultAiProSettings()
+                );
+
+        assertEquals(400, result.response().getTargetWidth());
+        assertEquals(200, result.response().getTargetHeight());
+
+        verify(realEsrganService).upscale(any(), eq(100), eq(50), eq(4));
+    }
+
+    @Test
+    void selectsThreeXWhenLongestSideIs2049() throws Exception {
+        when(realEsrganService.upscale(any(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(createPng(6147, 6));
+
+        ImageProcessingService.ProcessedImageResult result =
+                imageProcessingService.processImage(
+                        createInput(2049, 2),
+                        defaultAiProSettings()
+                );
+
+        assertEquals(6147, result.response().getTargetWidth());
+        assertEquals(6, result.response().getTargetHeight());
+
+        verify(realEsrganService).upscale(any(), eq(2049), eq(2), eq(3));
+    }
+
+    @Test
+    void selectsTwoXWhenLongestSideIs2731() throws Exception {
+        when(realEsrganService.upscale(any(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(createPng(5462, 4));
+
+        ImageProcessingService.ProcessedImageResult result =
+                imageProcessingService.processImage(
+                        createInput(2731, 2),
+                        defaultAiProSettings()
+                );
+
+        assertEquals(5462, result.response().getTargetWidth());
+        assertEquals(4, result.response().getTargetHeight());
+
+        verify(realEsrganService).upscale(any(), eq(2731), eq(2), eq(2));
+    }
+
+    @Test
+    void supportsInputWithLongestSideOf4096() throws Exception {
+        when(realEsrganService.upscale(any(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(createPng(8192, 2));
+
+        ImageProcessingService.ProcessedImageResult result =
+                imageProcessingService.processImage(
+                        createInput(4096, 1),
+                        defaultAiProSettings()
+                );
+
+        assertEquals(8192, result.response().getTargetWidth());
+        assertEquals(2, result.response().getTargetHeight());
+
+        verify(realEsrganService).upscale(any(), eq(4096), eq(1), eq(2));
+    }
+
+    @Test
+    void rejectsInputWithLongestSideAbove4096() throws Exception {
+        MockMultipartFile input = createInput(4097, 1);
+
+        InvalidImageException exception = assertThrows(
+                InvalidImageException.class,
+                () -> imageProcessingService.processImage(
+                        input, defaultAiProSettings()
+                )
+        );
+
+        assertTrue(exception.getMessage().contains("4096"));
+
+        verifyNoInteractions(realEsrganService);
     }
 }
