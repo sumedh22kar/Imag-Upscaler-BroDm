@@ -168,31 +168,27 @@ public class ImageProcessingService {
                             "ai_pro".equalsIgnoreCase(settings.getModel());
 
                     if (useAiPro) {
-                        if (settings.getTargetWidth() != null
-                                || settings.getTargetHeight() != null) {
-                            throw new InvalidImageException(
-                                    "AI Pro currently supports fixed 4x output only. "
-                                    + "Clear custom target dimensions and use AI Pro."
-                            );
-                        }
-
                         long aiWidth = (long) origWidth * 4;
                         long aiHeight = (long) origHeight * 4;
 
-                        if (aiWidth > maxWidthLimit
-                                || aiHeight > maxHeightLimit) {
-                            throw new InvalidImageException(
-                                    "The 4x AI output exceeds the maximum "
-                                    + "supported dimensions of "
-                                    + maxWidthLimit + "x" + maxHeightLimit
-                                    + " pixels."
-                            );
-                        }
+                        boolean hasCustomTarget =
+                                settings.getTargetWidth() != null
+                                || settings.getTargetHeight() != null;
 
-                        targetDim = new Dimension(
-                                (int) aiWidth,
-                                (int) aiHeight
-                        );
+                        if (hasCustomTarget) {
+                            targetDim = calculateTargetDimensions(
+                                    origWidth, origHeight, settings
+                            );
+                        } else {
+                            if (aiWidth > maxWidthLimit || aiHeight > maxHeightLimit) {
+                                throw new InvalidImageException(
+                                        "The 4x AI output exceeds the maximum supported dimensions of "
+                                                + maxWidthLimit + "x" + maxHeightLimit + " pixels."
+                                );
+                            }
+
+                            targetDim = new Dimension((int) aiWidth, (int) aiHeight);
+                        }
                     } else {
                         targetDim = calculateTargetDimensions(
                                 origWidth, origHeight, settings
@@ -433,9 +429,29 @@ public class ImageProcessingService {
 
             if (aiImage.getWidth() != targetWidth
                     || aiImage.getHeight() != targetHeight) {
-                throw new InvalidImageException(
-                        "AI output dimensions do not match the expected 4x dimensions."
+
+                BufferedImage resizedImage = LanczosResampler.resize(
+                        aiImage,
+                        targetWidth,
+                        targetHeight
                 );
+
+                if (resizedImage == null
+                        || resizedImage.getWidth() != targetWidth
+                        || resizedImage.getHeight() != targetHeight) {
+                    if (resizedImage != null && resizedImage != aiImage) {
+                        resizedImage.flush();
+                    }
+
+                    throw new InvalidImageException(
+                            "Could not resize AI output to the requested dimensions."
+                    );
+                }
+
+                if (resizedImage != aiImage) {
+                    aiImage.flush();
+                    aiImage = resizedImage;
+                }
             }
 
             String targetFormat = settings.getOutputFormat() != null

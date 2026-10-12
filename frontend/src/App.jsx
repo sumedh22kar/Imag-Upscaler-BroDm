@@ -668,7 +668,10 @@ function App() {
     try {
       const form = new FormData();
       form.append("file", file);
-      form.append("scaleFactor", settings.scaleFactor);
+      form.append(
+        "scaleFactor",
+        settings.model === "ai_pro" ? "4" : settings.scaleFactor
+      );
       form.append("targetWidth", settings.targetWidth);
       form.append("targetHeight", settings.targetHeight);
       form.append("outputFormat", settings.outputFormat);
@@ -1112,6 +1115,53 @@ function App() {
                   </p>
                 )}
             </>
+          )}
+
+          {/* Quick Resolution Presets */}
+          {settings.model === "ai_pro" && (
+            <div className="resolution-presets">
+              <label className="field-label">Quick Resolution Presets</label>
+
+              <div className="scale-options">
+                {[
+                  { label: "Full HD", width: 1920, height: 1080 },
+                  { label: "4K UHD", width: 3840, height: 2160 },
+                  { label: "8K UHD", width: 7680, height: 4320 },
+                ].map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    className={`scale-option ${
+                      Number(settings.targetWidth) === preset.width &&
+                      Number(settings.targetHeight) === preset.height
+                        ? "selected"
+                        : ""
+                    }`}
+                    disabled={busy}
+                    onClick={() => {
+                      setSizingMode("custom");
+                      setAspectRatioLocked(false);
+                      setSettings((old) => ({
+                        ...old,
+                        targetWidth: String(preset.width),
+                        targetHeight: String(preset.height),
+                      }));
+                      setResult(null);
+                      setError("");
+                    }}
+                    title={`${preset.width} × ${preset.height} pixels`}
+                  >
+                    <strong>{preset.label}</strong>
+                    <span>{preset.width} × {preset.height}</span>
+                  </button>
+                ))}
+              </div>
+
+              <p className="field-hint">
+                Presets use exact pixel dimensions. The image may be stretched if its
+                original aspect ratio differs from the selected preset.
+              </p>
+            </div>
           )}
 
           {/* Mode 2: Custom Dimensions with Aspect Ratio Lock */}
