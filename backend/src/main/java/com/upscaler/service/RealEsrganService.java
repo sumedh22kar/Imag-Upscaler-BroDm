@@ -143,12 +143,14 @@ public class RealEsrganService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
 
-            if (process != null) {
+            if (process != null && process.isAlive()) {
                 process.destroyForcibly();
             }
 
+            log.error("Real-ESRGAN process was interrupted", e);
+
             throw new InvalidImageException(
-                    "AI upscaling was interrupted.", e
+                    "AI upscaling failed. Please try another image or try again later."
             );
 
         } catch (IOException | RuntimeException e) {
@@ -160,10 +162,11 @@ public class RealEsrganService {
                 throw invalidImageException;
             }
 
-            throw new InvalidImageException(
-                    "Failed to run Real-ESRGAN: " + e.getMessage(), e
-            );
+            log.error("Failed to run Real-ESRGAN", e);
 
+            throw new InvalidImageException(
+                    "AI upscaling failed. Please try another image or try again later."
+            );
         } finally {
             if (tempDirectory != null) {
                 try (var paths = Files.walk(tempDirectory)) {
