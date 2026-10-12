@@ -43,7 +43,6 @@ export function createPngBuffer(width = 120, height = 80, withAlpha = true) {
   const row = Buffer.alloc(1 + width * 4);
   row[0] = 0; // None filter
   for (let x = 0; x < width; x++) {
-    const isTopHalf = true;
     row[1 + x * 4] = (x * 2) % 255; // R
     row[1 + x * 4 + 1] = 120;       // G
     row[1 + x * 4 + 2] = 220;       // B
@@ -103,7 +102,7 @@ export function cleanupTempFixtures() {
   if (fs.existsSync(tmpDir)) {
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
-    } catch (e) {
+    } catch {
       // Ignore cleanup error
     }
   }

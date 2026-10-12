@@ -8,307 +8,170 @@ import {
   cleanupTempFixtures,
 } from './test-helpers.js';
 
-test.describe('PixelPerfect Real Browser End-to-End Test Suite', () => {
+// These tests drive the real UI against the real Spring Boot backend on :8808.
+// Start both first: `mvn spring-boot:run` in backend/, `npm run dev` in frontend/.
+
+const upscaleButton = (page) => page.getByRole('button', { name: 'Upscale image' });
+const radio = (page, name) => page.getByRole('radio', { name });
+const pick = (page, name) => radio(page, name).check({ force: true });
+
+async function addImage(page, name, w, h) {
+  const fixture = writeTempFixture(name, createPngBuffer(w, h));
+  await page.locator('input[type="file"]').setInputFiles(fixture);
+  await expect(page.locator('.file-id strong')).toHaveText(name);
+}
+
+async function upscale(page) {
+  const [response] = await Promise.all([
+    page.waitForResponse((r) => r.url().includes('/api/images/upscale') && r.status() === 200),
+    upscaleButton(page).click(),
+  ]);
+  await expect(page.getByRole('button', { name: /^Download/ })).toBeVisible();
+  return response.json();
+}
+
+async function saveDownload(page, label) {
+  const pending = page.waitForEvent('download');
+  await page.getByRole('button', { name: /^Download/ }).click();
+  const download = await pending;
+  const target = writeTempFixture(label, Buffer.alloc(0));
+  await download.saveAs(target);
+  return { download, bytes: fs.readFileSync(target) };
+}
+
+test.describe('PixelPerfect end to end', () => {
   let consoleErrors = [];
 
   test.beforeEach(async ({ page }) => {
     consoleErrors = [];
     page.on('console', (msg) => {
-      if (msg.type() === 'error') {
-        consoleErrors.push(msg.text());
-      }
+      const url = msg.location().url || '';
+      if (msg.type() === 'error' && !/favicon|fonts\.g/.test(url)) consoleErrors.push(msg.text());
     });
-  });
-
-  test.afterAll(() => {
-    cleanupTempFixtures();
-  });
-
-  // 1. Initial Empty State & Brand Identity
-  test('1. Initial empty state displays correctly with no console errors', async ({ page }) => {
     await page.goto('/');
+  });
 
+  test.afterAll(() => cleanupTempFixtures());
+
+  test('1. empty state is ready to use and quiet', async ({ page }) => {
     await expect(page).toHaveTitle(/PixelPerfect/);
-    await expect(page.locator('.brand')).toContainText('PixelPerfect');
-    await expect(page.locator('.free-badge')).toContainText('FREE · NO AI');
-
-    // Step 01 dropzone
-    const dropzone = page.locator('.dropzone');
-    await expect(dropzone).toBeVisible();
-    await expect(dropzone).toContainText('Drop your image here');
-    await expect(dropzone).toContainText('Choose image');
-
-    // Step 02 output settings
-    await expect(page.getByRole('heading', { name: 'Output settings' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Scale Factor' })).toHaveClass(/active/);
-
-    // Primary resize button is disabled before upload
-    const resizeBtn = page.getByRole('button', { name: /Resize image/i });
-    await expect(resizeBtn).toBeDisabled();
-    await expect(resizeBtn).toHaveAttribute('title', 'Select or upload an image first');
-
-    // Verify backend is reachable without console errors
-    expect(consoleErrors.filter((e) => !e.includes('favicon'))).toHaveLength(0);
+    await expect(page.getByText('Drop an image on the sheet')).toBeVisible();
+    await expect(page.getByText('Server ready')).toBeVisible();
+    await expect(radio(page, 'A4')).toBeChecked();
+    await expect(radio(page, 'Portrait')).toBeChecked();
+    await expect(radio(page, /^300/)).toBeChecked();
+    await expect(upscaleButton(page)).toBeDisabled();
+    expect(consoleErrors).toHaveLength(0);
   });
 
-  // 2. Real Image Upload, Dimension Detection & Sizing Mode Controls
-  test('2. Upload real PNG, verify original dimensions, and change scale multiplier', async ({ page }) => {
-    const fixturePath = writeTempFixture('sample_150x100.png', createPngBuffer(150, 100));
-
-    await page.goto('/');
-
-    // Upload file
-    const fileInput = page.locator('input[type="file"]');
-    await fileInput.setInputFiles(fixturePath);
-
-    // Verify file details rendered in preview card
-    await expect(page.locator('.file-name')).toContainText('sample_150x100.png');
-    await expect(page.locator('.file-meta')).toContainText('150 × 100 px');
-    await expect(page.locator('.file-meta')).toContainText('PNG');
-
-    // Step 01 image info table
-    await expect(page.locator('.image-info')).toContainText('150 × 100 px');
-
-    // Default 2x multiplier should plan 300x200 px
-    const summaryCard = page.locator('.output-summary-card');
-    await expect(summaryCard).toBeVisible();
-    await expect(summaryCard).toContainText('300 × 200 px');
-
-    // Change scale factor to 4x
-    await page.getByRole('button', { name: '4×' }).click();
-    await expect(summaryCard).toContainText('600 × 400 px');
-    await expect(page.locator('.image-info')).toContainText('600 × 400 px');
+  test('2. adding an image shows its size, matches orientation and plans the output', async ({ page }) => {
+    await addImage(page, 'sample_150x100.png', 150, 100);
+    await expect(page.locator('.file-id span')).toContainText('150 × 100 px');
+    await expect(radio(page, 'Landscape')).toBeChecked();
+    await expect(page.locator('.facts')).toContainText('3508 × 2339 px');
+    await expect(page.getByRole('img', { name: /Print quality/ })).toBeVisible();
   });
 
-  // 3. End-to-End Upscale Processing through Real Spring Boot Backend
-  test('3. Process image via real backend and verify result metrics and preview', async ({ page }) => {
-    const fixturePath = writeTempFixture('test_process.png', createPngBuffer(100, 80));
-
-    await page.goto('/');
-    await page.locator('input[type="file"]').setInputFiles(fixturePath);
-
-    // Select 2x scale
-    await page.getByRole('button', { name: '2×' }).click();
-
-    // Click Resize image
-    const resizeBtn = page.getByRole('button', { name: /Resize image/i });
-    await expect(resizeBtn).toBeEnabled();
-
-    // Monitor network call to /api/images/upscale
-    const [response] = await Promise.all([
-      page.waitForResponse((res) => res.url().includes('/api/images/upscale') && res.status() === 200),
-      resizeBtn.click(),
-    ]);
-
-    expect(response.ok()).toBeTruthy();
-    const data = await response.json();
-    expect(data.targetWidth).toBe(200);
-    expect(data.targetHeight).toBe(160);
+  test('3. upscales to the planned size through the backend', async ({ page }) => {
+    await addImage(page, 'plan.png', 150, 100);
+    const data = await upscale(page);
+    expect(data.targetWidth).toBe(3508);
+    expect(data.targetHeight).toBe(2339);
     expect(data.outputFormat).toBe('PNG');
-
-    // Verify UI reflects successful completion
-    await expect(page.locator('.result-metrics-card')).toBeVisible();
-    await expect(page.locator('.result-metrics-heading')).toContainText('✓ Processing Completed Successfully');
-    await expect(page.locator('.result-metrics-grid')).toContainText('200 × 160 px');
-    await expect(page.locator('.result-metrics-grid')).toContainText('PNG · 300 DPI');
-
-    // Verify preview display
-    const previewImg = page.locator('.comparison-processed img');
-    await expect(previewImg).toBeVisible();
-    const src = await previewImg.getAttribute('src');
-    expect(src).toMatch(/^data:image\/png;base64,/);
+    expect(data.dpi).toBe(300);
+    await expect(page.getByText(/Upscaled to 3508 × 2339 px/)).toBeVisible();
+    await expect(page.locator('.compare img').nth(1)).toHaveAttribute('src', /^data:image\/png;base64,/);
   });
 
-  // 4. Download Execution & Binary File Inspection (Magic Bytes + Dimensions)
-  test('4. Download processed output and verify file signature, dimensions and filename', async ({ page }) => {
-    const fixturePath = writeTempFixture('download_test.png', createPngBuffer(120, 90));
-
-    await page.goto('/');
-    await page.locator('input[type="file"]').setInputFiles(fixturePath);
-    await page.getByRole('button', { name: '2×' }).click();
-
-    const resizeBtn = page.getByRole('button', { name: /Resize image/i });
-    await resizeBtn.click();
-    await expect(page.locator('.result-metrics-card')).toBeVisible();
-
-    // Trigger download
-    const downloadPromise = page.waitForEvent('download');
-    await page.getByRole('button', { name: /Download processed image/i }).click();
-    const download = await downloadPromise;
-
-    // Verify filename format: {name}_upscaled_{w}x{h}.png
-    const suggestedFilename = download.suggestedFilename();
-    expect(suggestedFilename).toContain('download_test_upscaled_240x180.png');
-
-    // Save and verify actual downloaded binary content
-    const downloadPath = writeTempFixture('downloaded_output.png', Buffer.alloc(0));
-    await download.saveAs(downloadPath);
-
-    const fileBuffer = fs.readFileSync(downloadPath);
-    expect(fileBuffer.length).toBeGreaterThan(0);
-
-    // Verify PNG header and dimensions directly from downloaded binary bytes
-    const dims = parsePngDimensions(fileBuffer);
-    expect(dims.width).toBe(240);
-    expect(dims.height).toBe(180);
+  test('4. downloads a PNG with the right pixels and a descriptive name', async ({ page }) => {
+    await addImage(page, 'holiday.png', 150, 100);
+    await upscale(page);
+    const { download, bytes } = await saveDownload(page, 'downloaded.png');
+    expect(download.suggestedFilename()).toBe('holiday-A4-3508x2339-300dpi.png');
+    expect(parsePngDimensions(bytes)).toEqual({ width: 3508, height: 2339 });
   });
 
-  // 5. Output Format Switching (JPEG with Quality Control)
-  test('5. Change output format to JPEG, process and verify JPEG binary structure', async ({ page }) => {
-    const fixturePath = writeTempFixture('jpeg_test.png', createPngBuffer(100, 100));
-
-    await page.goto('/');
-    await page.locator('input[type="file"]').setInputFiles(fixturePath);
-
-    // Select JPEG format
-    await page.locator('label', { hasText: 'Output format' }).locator('select').selectOption('JPEG');
-
-    // Quality slider should now appear
-    const qualityControl = page.locator('.quality-control');
-    await expect(qualityControl).toBeVisible();
-    await expect(qualityControl).toContainText('95%');
-
-    // Process image
-    const resizeBtn = page.getByRole('button', { name: /Resize image/i });
-    await resizeBtn.click();
-
-    await expect(page.locator('.result-metrics-card')).toBeVisible();
-    await expect(page.locator('.result-metrics-grid')).toContainText('JPEG');
-
-    // Download and verify JPEG magic bytes
-    const downloadPromise = page.waitForEvent('download');
-    await page.getByRole('button', { name: /Download processed image/i }).click();
-    const download = await downloadPromise;
-
-    expect(download.suggestedFilename()).toContain('.jpg');
-
-    const downloadPath = writeTempFixture('downloaded_jpeg.jpg', Buffer.alloc(0));
-    await download.saveAs(downloadPath);
-
-    const fileBuffer = fs.readFileSync(downloadPath);
-    expect(isJpegSignature(fileBuffer)).toBeTruthy();
+  test('5. fill sheet crops in the browser and returns the exact sheet size', async ({ page }) => {
+    await addImage(page, 'crop.png', 150, 100);
+    await pick(page, /^Fill sheet/);
+    const data = await upscale(page);
+    expect(data.targetWidth).toBe(3508);
+    expect(data.targetHeight).toBe(2480);
+    const { bytes } = await saveDownload(page, 'cropped.png');
+    expect(parsePngDimensions(bytes)).toEqual({ width: 3508, height: 2480 });
   });
 
-  // 6. Print Calculator Integration with Real Backend
-  test('6. Print calculator calculates A4 dimensions via backend and switches orientation', async ({ page }) => {
-    await page.goto('/');
-
-    // Switch to Print Calculator tab
-    await page.getByRole('button', { name: 'Print Calculator' }).click();
-
-    // Standard preset defaults to A4
-    const presetSelect = page.locator('label', { hasText: 'Print standard preset' }).locator('select');
-    await expect(presetSelect).toHaveValue('A4');
-
-    // Calculated card should display backend calculations for A4 at 300 DPI (2480 x 3508 px)
-    const calcCard = page.locator('.calculated-px-card');
-    await expect(calcCard).toBeVisible();
-    await expect(calcCard.locator('.calc-value')).toContainText('2480 × 3508 px');
-
-    // Switch orientation to Landscape
-    const landscapeBtn = page.locator('.orientation-btn', { hasText: '↔ Landscape' });
-    await landscapeBtn.click();
-    await expect(landscapeBtn).toHaveClass(/selected/);
-
-    // Should swap to 3508 x 2480 px
-    await expect(calcCard.locator('.calc-value')).toContainText('3508 × 2480 px');
+  test('6. JPEG output shows the quality slider and downloads a real JPEG', async ({ page }) => {
+    await addImage(page, 'jpeg_test.png', 100, 100);
+    await page.getByRole('combobox', { name: 'Format' }).selectOption('JPEG');
+    await expect(page.getByLabel(/Compression quality/)).toBeVisible();
+    await upscale(page);
+    const { download, bytes } = await saveDownload(page, 'downloaded.jpg');
+    expect(download.suggestedFilename()).toMatch(/\.jpg$/);
+    expect(isJpegSignature(bytes)).toBeTruthy();
   });
 
-  // 7. Invalid File Rejection
-  test('7. Reject invalid file format with user-friendly error banner', async ({ page }) => {
-    const textFixture = writeTempFixture('invalid.txt', Buffer.from('Not an image'));
-
-    await page.goto('/');
-    await page.locator('input[type="file"]').setInputFiles(textFixture);
-
-    const errorAlert = page.locator('.error-message');
-    await expect(errorAlert).toBeVisible();
-    await expect(errorAlert).toContainText(/Unsupported file format/);
+  test('7. scale mode multiplies the original', async ({ page }) => {
+    await addImage(page, 'scale.png', 150, 100);
+    await pick(page, 'Scale');
+    await pick(page, /^4×/);
+    const data = await upscale(page);
+    expect(data.targetWidth).toBe(600);
+    expect(data.targetHeight).toBe(400);
   });
 
-  // 8. Dimension Limits / Backend Oversized Rejection
-  test('8. Reject dimensions exceeding 8192px limit with clear feedback', async ({ page }) => {
-    await page.goto('/');
-
-    // Switch to Custom Pixels
-    await page.getByRole('button', { name: 'Custom Pixels' }).click();
-
-    // Fill in 9000 for width
-    const widthInput = page.locator('label', { hasText: 'Width (px)' }).locator('input');
-    await widthInput.fill('9000');
-
-    // Should display warning banner
-    await expect(page.locator('text=/exceed the backend maximum limit/')).toBeVisible();
+  test('8. a sheet that is too big is blocked, with a one-click fix', async ({ page }) => {
+    await addImage(page, 'big.png', 150, 100);
+    await pick(page, 'A3');
+    await pick(page, /^600/);
+    await expect(page.getByRole('alert')).toContainText('over the 8192 px limit');
+    await expect(upscaleButton(page)).toBeDisabled();
+    await page.getByRole('button', { name: 'Use 300 DPI' }).click();
+    await expect(upscaleButton(page)).toBeEnabled();
   });
 
-  // 9. Before/After Comparison Slider Interaction
-  test('9. Interactive comparison slider allows split position adjustment', async ({ page }) => {
-    const fixturePath = writeTempFixture('slider_test.png', createPngBuffer(80, 80));
+  test('9. unsupported files are refused with a clear message', async ({ page }) => {
+    const bad = writeTempFixture('invalid.txt', Buffer.from('Not an image'));
+    await page.locator('input[type="file"]').setInputFiles(bad);
+    await expect(page.getByRole('alert')).toContainText("isn't a supported image");
+  });
 
-    await page.goto('/');
-    await page.locator('input[type="file"]').setInputFiles(fixturePath);
-    await page.getByRole('button', { name: /Resize image/i }).click();
-
-    await expect(page.locator('.result-metrics-card')).toBeVisible();
-
-    const slider = page.locator('.comparison-container[role="slider"]');
-    await expect(slider).toBeVisible();
-    expect(await slider.getAttribute('aria-valuenow')).toBe('50');
-
-    // Adjust position via keyboard
+  test('10. the comparison slider works from the keyboard', async ({ page }) => {
+    await addImage(page, 'slider.png', 80, 80);
+    await upscale(page);
+    const slider = page.getByRole('slider', { name: /Before and after/ });
+    await expect(slider).toHaveAttribute('aria-valuenow', '50');
     await slider.focus();
     await page.keyboard.press('ArrowLeft');
     await page.keyboard.press('ArrowLeft');
-
-    const updatedPos = Number(await slider.getAttribute('aria-valuenow'));
-    expect(updatedPos).toBeLessThan(50);
+    expect(Number(await slider.getAttribute('aria-valuenow'))).toBeLessThan(50);
   });
 
-  // 10. Image Replacement Clears Stale Results
-  test('10. Replacing or removing image clears stale processing results', async ({ page }) => {
-    const fixture1 = writeTempFixture('first_img.png', createPngBuffer(80, 80));
-    const fixture2 = writeTempFixture('second_img.png', createPngBuffer(100, 100));
-
-    await page.goto('/');
-    await page.locator('input[type="file"]').setInputFiles(fixture1);
-    await page.getByRole('button', { name: /Resize image/i }).click();
-
-    await expect(page.locator('.result-metrics-card')).toBeVisible();
-
-    // Replace with second image
-    await page.locator('input[type="file"]').setInputFiles(fixture2);
-
-    // Stale results card should immediately disappear
-    await expect(page.locator('.result-metrics-card')).not.toBeVisible();
-    await expect(page.locator('.file-name')).toContainText('second_img.png');
-    await expect(page.locator('.file-meta')).toContainText('100 × 100 px');
+  test('11. changing a setting retires the old result, and replacing the image resets', async ({ page }) => {
+    await addImage(page, 'first.png', 80, 80);
+    await upscale(page);
+    await pick(page, /^150/);
+    await expect(page.getByRole('button', { name: /^Download/ })).toHaveCount(0);
+    await upscale(page);
+    await page.locator('input[type="file"]').setInputFiles(writeTempFixture('second.png', createPngBuffer(100, 100)));
+    await expect(page.locator('.file-id strong')).toHaveText('second.png');
+    await expect(page.getByRole('button', { name: /^Download/ })).toHaveCount(0);
   });
 
-  // 11. Responsive Layout at Desktop and Mobile Viewports
-  test('11. Responsive layout adapts cleanly to desktop and mobile viewports', async ({ page }) => {
-    // 1. Desktop Viewport
+  test('12. layout fits the screen on desktop and stacks without sideways scroll on mobile', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto('/');
-    await expect(page.locator('.workspace')).toBeVisible();
+    const stage = await page.locator('.stage').boundingBox();
+    const inspector = await page.locator('.inspector').boundingBox();
+    expect(inspector.x).toBeGreaterThanOrEqual(stage.x + stage.width - 2);
+    expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(800);
 
-    // Both panels side-by-side
-    const uploadBox = await page.locator('.upload-panel').boundingBox();
-    const settingsBox = await page.locator('.settings-panel').boundingBox();
-    expect(uploadBox).not.toBeNull();
-    expect(settingsBox).not.toBeNull();
-
-    // 2. Mobile Viewport (iPhone / Android)
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto('/');
-
-    const mobileUploadBox = await page.locator('.upload-panel').boundingBox();
-    const mobileSettingsBox = await page.locator('.settings-panel').boundingBox();
-
-    // In stacked mobile layout, settings panel is vertically below upload panel
-    expect(mobileSettingsBox.y).toBeGreaterThanOrEqual(mobileUploadBox.y + mobileUploadBox.height - 20);
-
-    // Topbar brand and badge remain properly visible without horizontal overflow
-    await expect(page.locator('.brand')).toBeVisible();
-    await expect(page.locator('.free-badge')).toBeVisible();
+    await addImage(page, 'phone.png', 120, 160);
+    const s = await page.locator('.stage').boundingBox();
+    const i = await page.locator('.inspector').boundingBox();
+    expect(i.y).toBeGreaterThanOrEqual(s.y + s.height - 2);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });
 });

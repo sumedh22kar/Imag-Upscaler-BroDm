@@ -1,1595 +1,929 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
+import { API, OFFLINE_MESSAGE, parseApiError } from "./lib/api.js";
+import {
+  AI_MAX_LONG_SIDE,
+  DPI_CHOICES,
+  MAX_SIDE,
+  MAX_UPLOAD_BYTES,
+  MIN_SIDE,
+  PAPERS,
+  aspectLabel,
+  computeCrop,
+  extensionFor,
+  fitWithin,
+  formatBytes,
+  getPaperMm,
+  isCropNeeded,
+  maxDpiForPaper,
+  paperToPixels,
+  safeBaseName,
+  sourceDensity,
+} from "./lib/print.js";
+import {
+  dataUrlToBlob,
+  decodeImage,
+  hasExifRotation,
+  isSupportedFile,
+  isTiff,
+  readTiffSize,
+  renderCrop,
+} from "./lib/image.js";
+import Segmented from "./components/Segmented.jsx";
+import SheetPreview from "./components/SheetPreview.jsx";
+import CompareSlider from "./components/CompareSlider.jsx";
+import QualityMeter from "./components/QualityMeter.jsx";
 
-const API = (
-  import.meta.env.VITE_API_BASE_URL || "http://localhost:8808"
-).replace(/\/+$/, "");
-
-const initialSettings = {
-  scaleFactor: "2",
-  targetWidth: "2480",
-  targetHeight: "3508",
-  outputFormat: "PNG",
-  dpi: "300",
-  quality: 95,
-  model: "bicubic",
-  maintainAspectRatio: true,
-};
-
-const ALLOWED_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"];
-const ALLOWED_MIME_TYPES = [
-  "image/png",
-  "image/x-png",
-  "image/jpeg",
-  "image/jpg",
-  "image/pjpeg",
-  "image/jfif",
-  "image/webp",
-  "image/bmp",
-  "image/x-ms-bmp",
-  "image/tiff",
-  "image/tif",
+const SIZE_MODES = [
+  { value: "paper", label: "Paper" },
+  { value: "pixels", label: "Pixels" },
+  { value: "scale", label: "Scale" },
 ];
 
-function getAspectRatioLabel(width, height) {
-  if (!width || !height) return "—";
-  const ratio = width / height;
-  if (Math.abs(ratio - 1) < 0.02) return "1:1 (Square)";
-  if (Math.abs(ratio - 16 / 9) < 0.03) return "16:9 (Landscape)";
-  if (Math.abs(ratio - 9 / 16) < 0.03) return "9:16 (Portrait)";
-  if (Math.abs(ratio - 4 / 3) < 0.03) return "4:3 (Standard)";
-  if (Math.abs(ratio - 3 / 4) < 0.03) return "3:4 (Portrait)";
-  if (Math.abs(ratio - 3 / 2) < 0.03) return "3:2 (Photo)";
-  if (Math.abs(ratio - 2 / 3) < 0.03) return "2:3 (Photo Portrait)";
-  return `${ratio.toFixed(2)}:1`;
-}
+const PAPER_OPTIONS = [
+  ...Object.entries(PAPERS).map(([value, p]) => ({ value, label: p.label })),
+  { value: "CUSTOM", label: "Custom" },
+];
 
-const PRESET_METADATA = {
-  A5: { name: "A5", wMm: 148, hMm: 210, cm: "14.8 × 21.0 cm", in: "5.83 × 8.27 in" },
-  A4: { name: "A4", wMm: 210, hMm: 297, cm: "21.0 × 29.7 cm", in: "8.27 × 11.69 in" },
-  A3: { name: "A3", wMm: 297, hMm: 420, cm: "29.7 × 42.0 cm", in: "11.69 × 16.54 in" },
-  LETTER: { name: "Letter", wMm: 215.9, hMm: 279.4, cm: "21.6 × 27.9 cm", in: "8.50 × 11.00 in" },
-  LEGAL: { name: "Legal", wMm: 215.9, hMm: 355.6, cm: "21.6 × 35.6 cm", in: "8.50 × 14.00 in" },
+const ORIENTATIONS = [
+  { value: "portrait", label: "Portrait" },
+  { value: "landscape", label: "Landscape" },
+];
+
+const UNITS = [
+  { value: "cm", label: "cm" },
+  { value: "in", label: "in" },
+];
+
+const SCALES = [1, 2, 4, 8];
+
+const METHODS = [
+  { value: "bicubic", label: "Bicubic", note: "Fast and smooth. Good for modest enlargements." },
+  { value: "classic_pro", label: "Lanczos", note: "Keeps edges crisper. Good for graphics and text." },
+  {
+    value: "ai_pro",
+    label: "AI (Real-ESRGAN)",
+    note: `Rebuilds fine detail in photos. Slower, accepts images up to ${AI_MAX_LONG_SIDE} px, and the server must have the AI engine enabled.`,
+  },
+];
+
+const FORMAT_NOTES = {
+  PNG: "Lossless. Larger files.",
+  JPEG: "Smallest files. No transparency.",
+  WEBP: "Small files. Not every print shop accepts it.",
+  BMP: "Uncompressed and very large. Carries no print size.",
+  TIFF: "Print-shop standard. Browsers can't preview it.",
 };
 
-function computeEffectiveDimensions(origW, origH, targetW, targetH, maintainAspect) {
-  const w = Number(targetW);
-  const h = Number(targetH);
-  if (!w || !h || isNaN(w) || isNaN(h) || w < 16 || h < 16) return null;
-  if (!origW || !origH || !maintainAspect) return { width: w, height: h };
-  const targetRatio = w / h;
-  const origRatio = origW / origH;
-  if (origRatio > targetRatio) {
-    return { width: w, height: Math.round(w / origRatio) };
-  } else {
-    return { width: Math.round(h * origRatio), height: h };
-  }
-}
+const DEFAULT_FORMATS = ["PNG", "JPEG", "WEBP", "BMP", "TIFF"];
+const BLANK = { w: 0, h: 0 };
 
-function dataUrlToBlob(dataUrl) {
-  const parts = dataUrl.split(",");
-  const mime = parts[0].match(/:(.*?);/)?.[1] || "application/octet-stream";
-  const bstr = atob(parts[1]);
-  let n = bstr.length;
-  const u8arr = new Uint8Array(n);
-  while (n--) {
-    u8arr[n] = bstr.charCodeAt(n);
-  }
-  return new Blob([u8arr], { type: mime });
-}
+const inches = (mm) => (mm / 25.4).toFixed(1);
+const cm = (mm) => (mm / 10).toFixed(1);
 
-function sanitizeFilename(name) {
-  if (!name) return "image";
-  return name
-    .replace(/\.[^/.]+$/, "")
-    .replace(/[<>:"/\\|?*]/g, "_")
-    .split("")
-    .filter((ch) => ch.charCodeAt(0) >= 32)
-    .join("")
-    .trim()
-    .slice(0, 80) || "image";
-}
+export default function App() {
+  const [file, setFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [src, setSrc] = useState(BLANK);
+  const [previewable, setPreviewable] = useState(true);
+  const [exifRotated, setExifRotated] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [dragging, setDragging] = useState(false);
 
-function getExtensionForFormat(format) {
-  const norm = (format || "").trim().toUpperCase();
-  switch (norm) {
-    case "JPEG":
-    case "JPG":
-      return ".jpg";
-    case "WEBP":
-      return ".webp";
-    case "BMP":
-      return ".bmp";
-    case "TIFF":
-    case "TIF":
-      return ".tiff";
-    case "PNG":
-    default:
-      return ".png";
-  }
-}
+  const [mode, setMode] = useState("paper");
+  const [paper, setPaper] = useState({ preset: "A4", orientation: "portrait", unit: "cm", w: "20", h: "30" });
+  const [px, setPx] = useState({ w: "", h: "", lock: true });
+  const [scale, setScale] = useState(2);
+  const [dpi, setDpi] = useState(300);
+  const [fit, setFit] = useState("fit");
+  const [focus, setFocus] = useState({ x: 0.5, y: 0.5 });
+  const [model, setModel] = useState("bicubic");
+  const [format, setFormat] = useState("PNG");
+  const [quality, setQuality] = useState(95);
+  const [formats, setFormats] = useState(DEFAULT_FORMATS);
 
-function getDpiSupportNote(format) {
-  const norm = (format || "").toUpperCase();
-  if (norm === "PNG" || norm === "JPEG" || norm === "JPG" || norm === "TIFF" || norm === "TIF") {
-    return "Verified DPI metadata written to header";
-  }
-  return "Resampled to target pixel dimensions";
-}
+  const [server, setServer] = useState("checking");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [result, setResult] = useState(null);
+  const [view, setView] = useState("compare");
 
-async function parseApiError(response) {
-  let message = "";
-  try {
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.includes("application/json")) {
-      const body = await response.json();
-      if (body?.validationErrors && typeof body.validationErrors === "object") {
-        const fieldMsgs = Object.values(body.validationErrors).flat().filter(Boolean);
-        if (fieldMsgs.length > 0) message = fieldMsgs.join(". ");
-      }
-      if (!message && body?.message) {
-        message = body.message;
-      }
-      if (!message && body?.error) {
-        message = body.error;
-      }
-    } else {
-      const text = await response.text();
-      if (text && text.trim().length > 0 && text.length < 250 && !text.includes("<!DOCTYPE") && !text.includes("<html")) {
-        message = text.trim();
-      }
-    }
-  } catch {
-    // Fall back to HTTP status message below
+  const inputRef = useRef(null);
+  const urlRef = useRef("");
+  const loadId = useRef(0);
+  const runId = useRef(0);
+  const abortRef = useRef(null);
+
+  /* ---------- server ---------- */
+
+  const [probeTick, setProbeTick] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API}/api/images/config`)
+      .then((res) => {
+        if (!res.ok) throw new Error("config");
+        return res.json();
+      })
+      .then((cfg) => {
+        if (cancelled) return;
+        setServer("up");
+        if (Array.isArray(cfg.supportedFormats) && cfg.supportedFormats.length) {
+          setFormats(cfg.supportedFormats);
+          setFormat((old) => (cfg.supportedFormats.includes(old) ? old : cfg.supportedFormats[0]));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setServer("down");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [probeTick]);
+
+  function retryServer() {
+    setServer("checking");
+    setProbeTick((n) => n + 1);
   }
 
-  if (!message) {
-    switch (response.status) {
-      case 400:
-        message = "Invalid image processing request. Please verify the dimensions and format settings.";
-        break;
-      case 413:
-        message = "The uploaded file exceeds the 50MB maximum server upload limit.";
-        break;
-      case 415:
-        message = "Unsupported image format. Please upload a PNG, JPEG, WebP, BMP, or TIFF file.";
-        break;
-      case 429:
-        message = "Too many requests. Please wait a moment before trying again.";
-        break;
-      case 500:
-        message = "Server error occurred while processing the image. Please try again.";
-        break;
-      case 502:
-      case 503:
-      case 504:
-        message = "The image processing service is temporarily unavailable. Please verify the backend is running on port 8808.";
-        break;
-      default:
-        message = `Image processing failed with status HTTP ${response.status}.`;
-        break;
-    }
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+      if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+    },
+    [],
+  );
+
+  /* ---------- derived print maths ---------- */
+
+  const hasSrc = src.w > 0 && src.h > 0;
+  const paperMm = getPaperMm({
+    preset: paper.preset,
+    orientation: paper.orientation,
+    unit: paper.unit,
+    customW: paper.w,
+    customH: paper.h,
+  });
+
+  let box = null;
+  if (mode === "paper") {
+    box = paperToPixels(paperMm, dpi);
+  } else if (mode === "pixels") {
+    const w = Math.round(Number(px.w));
+    const h = Math.round(Number(px.h));
+    if (w > 0 && h > 0) box = { w, h };
   }
 
-  return message;
-}
+  const effFit = mode === "scale" || !previewable ? "fit" : fit;
 
-function ImageComparisonSlider({
-  originalSrc,
-  processedSrc,
-  originalDimensions,
-  processedDimensions,
-}) {
-  const [sliderPos, setSliderPos] = useState(50);
-  const [isDragging, setIsDragging] = useState(false);
-  const containerRef = useRef(null);
-
-  const updatePosition = useCallback((clientX) => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    const x = clientX - rect.left;
-    const pos = Math.max(0, Math.min(100, (x / rect.width) * 100));
-    setSliderPos(pos);
-  }, []);
-
-  const handlePointerDown = (e) => {
-    setIsDragging(true);
-    e.currentTarget.setPointerCapture(e.pointerId);
-    updatePosition(e.clientX);
-  };
-
-  const handlePointerMove = (e) => {
-    if (!isDragging) return;
-    updatePosition(e.clientX);
-  };
-
-  const handlePointerUp = (e) => {
-    if (isDragging) {
-      setIsDragging(false);
-      try {
-        e.currentTarget.releasePointerCapture(e.pointerId);
-      } catch {
-        // Pointer capture may have already been released
+  let out = null;
+  let used = null;
+  let crop = null;
+  if (hasSrc) {
+    if (mode === "scale") {
+      out = { w: Math.round(src.w * scale), h: Math.round(src.h * scale) };
+      used = src;
+    } else if (box) {
+      if (effFit === "fill") {
+        crop = computeCrop(src.w, src.h, box.w, box.h, focus.x, focus.y);
+        out = box;
+        used = { w: crop.w, h: crop.h };
+      } else {
+        out = fitWithin(src.w, src.h, box.w, box.h);
+        used = src;
       }
     }
-  };
+  }
 
-  const handleKeyDown = (e) => {
-    if (e.key === "ArrowLeft") {
-      e.preventDefault();
-      setSliderPos((p) => Math.max(0, p - 5));
-    } else if (e.key === "ArrowRight") {
-      e.preventDefault();
-      setSliderPos((p) => Math.min(100, p + 5));
-    } else if (e.key === "Home") {
-      e.preventDefault();
-      setSliderPos(0);
-    } else if (e.key === "End") {
-      e.preventDefault();
-      setSliderPos(100);
+  const density = out && used ? sourceDensity(used.w, used.h, out.w, out.h, dpi) : null;
+
+  const sheetRatio = box ? box.w / box.h : mode === "scale" && hasSrc ? src.w / src.h : 3 / 4;
+
+  /* ---------- blocking problems ---------- */
+
+  let problem = "";
+  let fixDpi = null;
+  if (mode === "paper" && !paperMm) {
+    problem = "Enter a width and a height greater than zero.";
+  } else if (mode === "pixels" && !box) {
+    problem = "Enter a width and a height in pixels.";
+  } else if (box || out) {
+    const tooSmall = (box && (box.w < MIN_SIDE || box.h < MIN_SIDE)) || (out && (out.w < MIN_SIDE || out.h < MIN_SIDE));
+    const tooBig = (box && (box.w > MAX_SIDE || box.h > MAX_SIDE)) || (out && (out.w > MAX_SIDE || out.h > MAX_SIDE));
+    const dims = box || out;
+    if (tooSmall) {
+      problem = `${dims.w} × ${dims.h} px is below the ${MIN_SIDE} px minimum on one side.`;
+    } else if (tooBig) {
+      problem = `${dims.w} × ${dims.h} px is over the ${MAX_SIDE} px limit on one side.`;
+      if (mode === "paper") {
+        const ceiling = maxDpiForPaper(paperMm);
+        const fits = [...DPI_CHOICES].reverse().find((d) => d.value <= ceiling);
+        if (fits) {
+          fixDpi = fits.value;
+          problem += ` This sheet fits at ${fits.value} DPI or lower.`;
+        } else {
+          problem += " Choose a smaller sheet.";
+        }
+      } else if (mode === "scale") {
+        problem += " Choose a smaller scale.";
+      } else {
+        problem += " Enter smaller dimensions.";
+      }
     }
-  };
+  }
+  if (!problem && model === "ai_pro" && used && Math.max(used.w, used.h) > AI_MAX_LONG_SIDE) {
+    problem = `AI works on images up to ${AI_MAX_LONG_SIDE} px on the longest side. This one is ${Math.max(used.w, used.h)} px. Switch to Lanczos or crop the image first.`;
+  }
+
+  /* ---------- result bookkeeping ---------- */
+
+  const signature = JSON.stringify([
+    file?.name,
+    file?.size,
+    mode,
+    box,
+    scale,
+    dpi,
+    effFit,
+    effFit === "fill" ? crop : null,
+    model,
+    format,
+    quality,
+  ]);
+  const activeResult = result && result.sig === signature ? result : null;
+  const activeError = error && (error.sig === null || error.sig === signature) ? error.msg : "";
+  const resultFormat = (activeResult?.data.outputFormat || format).toUpperCase();
+  const outputPreviewable = resultFormat !== "TIFF";
+  const canCompare = Boolean(activeResult && previewable && outputPreviewable);
+  const showCompare = canCompare && view === "compare";
+
+  /* ---------- file handling ---------- */
+
+  function replaceUrl(next) {
+    if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+    urlRef.current = next;
+    setPreviewUrl(next);
+  }
+
+  async function chooseFile(selected) {
+    if (!selected) return;
+    runId.current++;
+    abortRef.current?.abort();
+    setBusy(false);
+
+    if (!isSupportedFile(selected)) {
+      setError({ sig: null, msg: `${selected.name || "That file"} isn't a supported image. Use PNG, JPEG, WebP, BMP or TIFF.` });
+      return;
+    }
+    if (selected.size > MAX_UPLOAD_BYTES) {
+      setError({ sig: null, msg: `${selected.name} is ${formatBytes(selected.size)}. The upload limit is 50 MB.` });
+      return;
+    }
+
+    const id = ++loadId.current;
+    setError(null);
+    setLoading(true);
+
+    const url = URL.createObjectURL(selected);
+    let size = null;
+    let canPreview = true;
+    try {
+      const decoded = await decodeImage(url);
+      size = { width: decoded.width, height: decoded.height };
+    } catch {
+      canPreview = false;
+      if (isTiff(selected)) size = await readTiffSize(selected);
+    }
+
+    if (id !== loadId.current) {
+      URL.revokeObjectURL(url);
+      return;
+    }
+    if (!size) {
+      URL.revokeObjectURL(url);
+      setLoading(false);
+      setError({ sig: null, msg: "This file couldn't be read. It may be damaged or saved in an unusual variant." });
+      return;
+    }
+    if (size.width < MIN_SIDE || size.height < MIN_SIDE) {
+      URL.revokeObjectURL(url);
+      setLoading(false);
+      setError({ sig: null, msg: `This image is ${size.width} × ${size.height} px. The minimum is ${MIN_SIDE} × ${MIN_SIDE} px.` });
+      return;
+    }
+
+    const rotated = canPreview ? await hasExifRotation(selected, size.width, size.height) : false;
+    if (id !== loadId.current) {
+      URL.revokeObjectURL(url);
+      return;
+    }
+
+    replaceUrl(url);
+    setFile(selected);
+    setSrc({ w: size.width, h: size.height });
+    setPreviewable(canPreview);
+    setExifRotated(rotated);
+    setFocus({ x: 0.5, y: 0.5 });
+    setResult(null);
+    setView("compare");
+    setPx({ w: String(size.width), h: String(size.height), lock: true });
+    setPaper((p) => (p.preset === "CUSTOM" ? p : { ...p, orientation: size.width > size.height ? "landscape" : "portrait" }));
+    setLoading(false);
+    if (inputRef.current) inputRef.current.value = "";
+  }
+
+  function removeImage() {
+    runId.current++;
+    loadId.current++;
+    abortRef.current?.abort();
+    replaceUrl("");
+    setFile(null);
+    setSrc(BLANK);
+    setResult(null);
+    setError(null);
+    setBusy(false);
+    setLoading(false);
+    if (inputRef.current) inputRef.current.value = "";
+  }
+
+  function openPicker() {
+    if (!busy) inputRef.current?.click();
+  }
+
+  /* ---------- size controls ---------- */
+
+  function changeUnit(next) {
+    setPaper((p) => {
+      if (p.unit === next) return p;
+      const k = p.unit === "cm" ? 1 / 2.54 : 2.54;
+      const convert = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n > 0 ? String(Math.round(n * k * 100) / 100) : v;
+      };
+      return { ...p, unit: next, w: convert(p.w), h: convert(p.h) };
+    });
+  }
+
+  function changePxW(v) {
+    setPx((old) => {
+      const next = { ...old, w: v };
+      if (old.lock && hasSrc && Number(v) > 0) next.h = String(Math.round((Number(v) * src.h) / src.w));
+      return next;
+    });
+  }
+
+  function changePxH(v) {
+    setPx((old) => {
+      const next = { ...old, h: v };
+      if (old.lock && hasSrc && Number(v) > 0) next.w = String(Math.round((Number(v) * src.w) / src.h));
+      return next;
+    });
+  }
+
+  /* ---------- processing ---------- */
+
+  async function buildUpload() {
+    const needsCrop = effFit === "fill" && crop && isCropNeeded(crop, src.w, src.h);
+    if (!needsCrop && !exifRotated) return file;
+    const rect = needsCrop ? crop : { x: 0, y: 0, w: src.w, h: src.h };
+    const { blob, ext } = await renderCrop(file, rect);
+    return new File([blob], `${safeBaseName(file.name)}${ext}`, { type: blob.type });
+  }
+
+  async function run() {
+    if (!file || busy || problem) return;
+
+    const id = ++runId.current;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    const limitMs = model === "ai_pro" ? 240_000 : 90_000;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, limitMs);
+
+    const sig = signature;
+    setBusy(true);
+    setError(null);
+
+    try {
+      const upload = await buildUpload();
+      if (id !== runId.current) return;
+
+      const form = new FormData();
+      form.append("file", upload);
+      form.append("model", model);
+      form.append("outputFormat", format);
+      form.append("dpi", String(dpi));
+      form.append("quality", String(quality));
+      if (mode === "scale") {
+        form.append("scaleFactor", String(scale));
+        form.append("targetWidth", String(out.w));
+        form.append("targetHeight", String(out.h));
+        form.append("maintainAspectRatio", "false");
+      } else {
+        form.append("targetWidth", String(box.w));
+        form.append("targetHeight", String(box.h));
+        form.append("maintainAspectRatio", effFit === "fit" ? "true" : "false");
+      }
+
+      const res = await fetch(`${API}/api/images/upscale`, { method: "POST", body: form, signal: controller.signal });
+      if (id !== runId.current) return;
+      if (!res.ok) throw new Error(await parseApiError(res));
+
+      const data = await res.json();
+      if (id !== runId.current) return;
+      if (!data?.dataUrl) throw new Error("The server finished but sent no image back. Try again.");
+
+      setResult({ data, sig });
+      setView("compare");
+      setServer("up");
+    } catch (err) {
+      if (id !== runId.current) return;
+      if (err?.name === "AbortError") {
+        if (timedOut) {
+          setError({ sig, msg: `This took longer than ${limitMs / 1000} seconds and was stopped. Try a smaller output size.` });
+        }
+        return;
+      }
+      if (err instanceof TypeError) {
+        setServer("down");
+        setError({ sig, msg: OFFLINE_MESSAGE });
+      } else {
+        setError({ sig, msg: err?.message || "Something went wrong while processing the image." });
+      }
+    } finally {
+      clearTimeout(timer);
+      if (id === runId.current) setBusy(false);
+    }
+  }
+
+  function cancel() {
+    runId.current++;
+    abortRef.current?.abort();
+    setBusy(false);
+  }
+
+  function download() {
+    if (!activeResult) return;
+    const { data } = activeResult;
+    try {
+      const blob = dataUrlToBlob(data.dataUrl);
+      const sheet = mode === "paper" ? `-${paper.preset === "CUSTOM" ? "custom" : PAPERS[paper.preset].label.replace("×", "x").replace(" in", "in")}` : "";
+      const name = `${safeBaseName(file.name)}${sheet}-${data.targetWidth}x${data.targetHeight}-${data.dpi}dpi${extensionFor(data.outputFormat)}`;
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = href;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(href), 2000);
+    } catch {
+      setError({ sig: signature, msg: "The download couldn't be created. Run the upscale again." });
+    }
+  }
+
+  /* ---------- labels for the stage ---------- */
+
+  let labelW = "";
+  let labelH = "";
+  if (mode === "paper" && paperMm) {
+    labelW = `${cm(paperMm.w)} cm / ${inches(paperMm.w)} in`;
+    labelH = `${cm(paperMm.h)} cm / ${inches(paperMm.h)} in`;
+  } else if (box) {
+    labelW = `${box.w} px`;
+    labelH = `${box.h} px`;
+  } else if (out) {
+    labelW = `${out.w} px`;
+    labelH = `${out.h} px`;
+  }
+
+  const printCm = out ? { w: ((out.w / dpi) * 2.54).toFixed(1), h: ((out.h / dpi) * 2.54).toFixed(1) } : null;
+  const qualityActive = (format === "JPEG" || format === "WEBP") && !busy;
+
+  const emptySheet = (
+    <div className="empty">
+      <strong>{loading ? "Reading image" : "Drop an image on the sheet"}</strong>
+      <span>PNG, JPEG, WebP, BMP or TIFF, up to 50 MB.</span>
+      <button type="button" className="btn btn-primary" onClick={openPicker} disabled={loading}>
+        Choose image
+      </button>
+    </div>
+  );
+
+  const sheetPlaceholder = file ? (
+    <div className="empty">
+      <strong>{outputPreviewable ? "No preview in this browser" : "TIFF can't be previewed here"}</strong>
+      <span>{activeResult ? "Your file is ready to download." : "The file will still be processed."}</span>
+    </div>
+  ) : (
+    emptySheet
+  );
+
+  /* ---------- render ---------- */
 
   return (
-    <div
-      ref={containerRef}
-      className="comparison-container"
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
-      role="slider"
-      aria-label="Before and after image comparison slider. Use left and right arrow keys to adjust split position."
-      aria-valuenow={Math.round(sliderPos)}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      tabIndex={0}
-      onKeyDown={handleKeyDown}
-    >
-      {/* Background layer: Original image (revealed on the left) */}
-      <div className="comparison-layer comparison-original">
-        <img src={originalSrc} alt="Original input image" draggable={false} />
-        <span className="comparison-badge badge-original">
-          ORIGINAL {originalDimensions?.width ? `(${originalDimensions.width} × ${originalDimensions.height} px)` : ""}
-        </span>
-      </div>
-
-      {/* Foreground layer: Processed image (revealed on the right) */}
-      <div
-        className="comparison-layer comparison-processed"
-        style={{ clipPath: `inset(0 0 0 ${sliderPos}%)` }}
-      >
-        <img src={processedSrc} alt="Processed resampled output image" draggable={false} />
-        <span className="comparison-badge badge-processed">
-          PROCESSED {processedDimensions?.width ? `(${processedDimensions.width} × ${processedDimensions.height} px)` : ""}
-        </span>
-      </div>
-
-      {/* Interactive Divider Line and Center Grab Handle */}
-      <div className="comparison-divider" style={{ left: `${sliderPos}%` }}>
-        <div className="comparison-handle" aria-hidden="true">
-          <span>‹</span>
-          <span>›</span>
+    <div className="app">
+      <header className="topbar">
+        <a className="brand" href="/">
+          <span className="brand-mark" aria-hidden="true" />
+          PixelPerfect
+        </a>
+        <div className={`server is-${server}`} role="status">
+          <span className="server-dot" aria-hidden="true" />
+          {server === "up" && "Server ready"}
+          {server === "checking" && "Checking server"}
+          {server === "down" && (
+            <>
+              Server offline
+              <button type="button" className="text-btn" onClick={retryServer}>
+                Retry
+              </button>
+            </>
+          )}
         </div>
+      </header>
+
+      <div className="workbench">
+        <section
+          className={`stage${dragging ? " is-dragging" : ""}`}
+          aria-label="Preview"
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (!busy) setDragging(true);
+          }}
+          onDragLeave={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false);
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragging(false);
+            if (!busy) chooseFile(e.dataTransfer.files?.[0]);
+          }}
+        >
+          <div className="stage-bar">
+            {file ? (
+              <>
+                <div className="file-id">
+                  <strong title={file.name}>{file.name}</strong>
+                  <span>
+                    {src.w} × {src.h} px, {aspectLabel(src.w, src.h)}, {formatBytes(file.size)}
+                  </span>
+                </div>
+                <div className="stage-actions">
+                  {activeResult && (
+                    <Segmented
+                      name="view"
+                      label="Preview"
+                      value={showCompare ? "compare" : "sheet"}
+                      onChange={setView}
+                      options={[
+                        { value: "compare", label: "Before and after", disabled: !canCompare },
+                        { value: "sheet", label: "Sheet" },
+                      ]}
+                    />
+                  )}
+                  <button type="button" className="text-btn" onClick={openPicker} disabled={busy}>
+                    Replace
+                  </button>
+                  <button type="button" className="text-btn" onClick={removeImage} disabled={busy}>
+                    Remove
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="file-id">
+                <strong>Print sheet</strong>
+                <span>Choose the paper on the right, then add your image.</span>
+              </div>
+            )}
+          </div>
+
+          {showCompare ? (
+            <CompareSlider
+              beforeSrc={previewUrl}
+              afterSrc={activeResult.data.dataUrl}
+              ratio={activeResult.data.targetWidth / activeResult.data.targetHeight}
+              beforeLabel={`Original ${src.w} × ${src.h}`}
+              afterLabel={`Upscaled ${activeResult.data.targetWidth} × ${activeResult.data.targetHeight}`}
+              beforeStyle={effFit === "fill" ? { objectPosition: `${focus.x * 100}% ${focus.y * 100}%` } : undefined}
+            />
+          ) : (
+            <SheetPreview
+              ratio={sheetRatio}
+              labelW={labelW}
+              labelH={labelH}
+              src={previewUrl}
+              srcW={src.w}
+              srcH={src.h}
+              previewable={previewable}
+              fit={effFit}
+              focus={focus}
+              onFocus={setFocus}
+              placeholder={sheetPlaceholder}
+            />
+          )}
+
+          {out && (
+            <div className="stage-foot">
+              <dl className="facts">
+                <div>
+                  <dt>Original</dt>
+                  <dd>
+                    {src.w} × {src.h} px
+                  </dd>
+                </div>
+                <div>
+                  <dt>Output</dt>
+                  <dd>
+                    {out.w} × {out.h} px
+                  </dd>
+                </div>
+                <div>
+                  <dt>Prints at</dt>
+                  <dd>
+                    {printCm.w} × {printCm.h} cm at {dpi} DPI
+                  </dd>
+                </div>
+              </dl>
+              {file && density != null && !problem && <QualityMeter density={density} ai={model === "ai_pro"} />}
+            </div>
+          )}
+        </section>
+
+        <form
+          className="inspector"
+          onSubmit={(e) => {
+            e.preventDefault();
+            run();
+          }}
+        >
+          <div className="inspector-body">
+            <input
+              ref={inputRef}
+              type="file"
+              hidden
+              accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff"
+              onChange={(e) => chooseFile(e.target.files?.[0])}
+            />
+
+            <fieldset className="group" disabled={busy}>
+              <legend>Size by</legend>
+              <Segmented name="mode" label="Size by" value={mode} onChange={setMode} options={SIZE_MODES} />
+
+              {mode === "paper" && (
+                <>
+                  <Segmented
+                    name="paper"
+                    label="Paper size"
+                    className="wrap"
+                    value={paper.preset}
+                    onChange={(preset) => setPaper((p) => ({ ...p, preset }))}
+                    options={PAPER_OPTIONS}
+                  />
+                  {paper.preset !== "CUSTOM" ? (
+                    <Segmented
+                      name="orientation"
+                      label="Orientation"
+                      value={paper.orientation}
+                      onChange={(orientation) => setPaper((p) => ({ ...p, orientation }))}
+                      options={ORIENTATIONS}
+                    />
+                  ) : (
+                    <>
+                      <Segmented name="unit" label="Unit" value={paper.unit} onChange={changeUnit} options={UNITS} />
+                      <div className="pair">
+                        <label className="field">
+                          <span>Width ({paper.unit})</span>
+                          <input
+                            type="number"
+                            inputMode="decimal"
+                            min="0.1"
+                            step="0.1"
+                            value={paper.w}
+                            onChange={(e) => setPaper((p) => ({ ...p, w: e.target.value }))}
+                          />
+                        </label>
+                        <label className="field">
+                          <span>Height ({paper.unit})</span>
+                          <input
+                            type="number"
+                            inputMode="decimal"
+                            min="0.1"
+                            step="0.1"
+                            value={paper.h}
+                            onChange={(e) => setPaper((p) => ({ ...p, h: e.target.value }))}
+                          />
+                        </label>
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+
+              {mode === "pixels" && (
+                <>
+                  <div className="pair">
+                    <label className="field">
+                      <span>Width (px)</span>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min={MIN_SIDE}
+                        max={MAX_SIDE}
+                        value={px.w}
+                        onChange={(e) => changePxW(e.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Height (px)</span>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min={MIN_SIDE}
+                        max={MAX_SIDE}
+                        value={px.h}
+                        onChange={(e) => changePxH(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <button
+                    type="button"
+                    className="toggle"
+                    aria-pressed={px.lock}
+                    onClick={() => setPx((old) => ({ ...old, lock: !old.lock }))}
+                  >
+                    <span className="toggle-box" aria-hidden="true" />
+                    Keep the image's proportions
+                  </button>
+                </>
+              )}
+
+              {mode === "scale" && (
+                <Segmented
+                  name="scale"
+                  label="Scale"
+                  value={scale}
+                  onChange={(v) => setScale(Number(v))}
+                  options={SCALES.map((s) => {
+                    const longest = hasSrc ? Math.round(Math.max(src.w, src.h) * s) : 0;
+                    return {
+                      value: s,
+                      label: `${s}×`,
+                      hint: hasSrc ? `${longest} px` : undefined,
+                      disabled: longest > MAX_SIDE,
+                    };
+                  })}
+                />
+              )}
+            </fieldset>
+
+            <fieldset className="group" disabled={busy}>
+              <legend>Resolution</legend>
+              <Segmented
+                name="dpi"
+                label="Resolution in DPI"
+                value={dpi}
+                onChange={(v) => setDpi(Number(v))}
+                options={DPI_CHOICES.map((d) => ({ value: d.value, label: d.label, hint: d.hint }))}
+              />
+              <p className="hint">
+                {mode === "paper"
+                  ? "The sheet stays the same size. A higher DPI means more pixels to fill it."
+                  : "Saved in the file so printers know the intended print size."}
+              </p>
+            </fieldset>
+
+            {mode !== "scale" && (
+              <fieldset className="group" disabled={busy}>
+                <legend>Fit</legend>
+                <Segmented
+                  name="fit"
+                  label="Fit"
+                  value={effFit}
+                  onChange={setFit}
+                  options={[
+                    { value: "fit", label: "Fit inside", hint: "Keep it all" },
+                    { value: "fill", label: "Fill sheet", hint: "Crop to shape", disabled: !previewable },
+                  ]}
+                />
+                <p className="hint">
+                  {effFit === "fill"
+                    ? "Crops the image to the sheet's shape. Drag the image on the sheet to choose what stays."
+                    : !previewable && file
+                      ? "Cropping needs an image this browser can display, so it's off for this file."
+                      : "The whole image stays visible. One edge may leave a blank margin."}
+                </p>
+              </fieldset>
+            )}
+
+            <fieldset className="group" disabled={busy}>
+              <legend>Method</legend>
+              <label className="field">
+                <span className="sr-only">Method</span>
+                <select value={model} onChange={(e) => setModel(e.target.value)}>
+                  {METHODS.map((m) => (
+                    <option key={m.value} value={m.value}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="hint">{METHODS.find((m) => m.value === model)?.note}</p>
+            </fieldset>
+
+            <fieldset className="group" disabled={busy}>
+              <legend>File</legend>
+              <label className="field">
+                <span>Format</span>
+                <select value={format} onChange={(e) => setFormat(e.target.value)}>
+                  {formats.map((f) => (
+                    <option key={f} value={f}>
+                      {f}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="hint">{FORMAT_NOTES[format] || ""}</p>
+              {(format === "JPEG" || format === "WEBP") && (
+                <label className="field">
+                  <span>
+                    Compression quality <b>{quality}%</b>
+                  </span>
+                  <input
+                    type="range"
+                    min="50"
+                    max="100"
+                    step="5"
+                    value={quality}
+                    disabled={!qualityActive}
+                    onChange={(e) => setQuality(Number(e.target.value))}
+                  />
+                </label>
+              )}
+            </fieldset>
+
+          </div>
+
+          <div className="actions">
+            {problem && (
+              <div className="notice" role="alert">
+                <p>{problem}</p>
+                {fixDpi && (
+                  <button type="button" className="btn btn-quiet" onClick={() => setDpi(fixDpi)}>
+                    Use {fixDpi} DPI
+                  </button>
+                )}
+              </div>
+            )}
+
+            {activeError && (
+              <div className="notice is-error" role="alert">
+                <p>{activeError}</p>
+              </div>
+            )}
+            {activeResult ? (
+              <>
+                <p className="done" role="status">
+                  Upscaled to {activeResult.data.targetWidth} × {activeResult.data.targetHeight} px
+                  {activeResult.data.processingDurationMs != null && ` in ${(activeResult.data.processingDurationMs / 1000).toFixed(1)} s`}
+                  {activeResult.data.outputSizeBytes > 0 && `, ${formatBytes(activeResult.data.outputSizeBytes)}`}.
+                </p>
+                <button type="button" className="btn btn-primary" onClick={download}>
+                  Download {resultFormat}
+                </button>
+                <button type="button" className="btn btn-quiet" onClick={openPicker}>
+                  Choose another image
+                </button>
+              </>
+            ) : busy ? (
+              <>
+                <button type="button" className="btn btn-primary" disabled aria-busy="true">
+                  <span className="spinner" aria-hidden="true" />
+                  Upscaling
+                </button>
+                <p className="hint" role="status">
+                  {model === "ai_pro" ? "AI upscaling can take a minute or more." : "This usually takes a few seconds."}
+                </p>
+                <button type="button" className="btn btn-quiet" onClick={cancel}>
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <button type="submit" className="btn btn-primary" disabled={!file || Boolean(problem) || loading}>
+                  Upscale image
+                </button>
+                {!file && <p className="hint">Add an image to continue.</p>}
+              </>
+            )}
+          </div>
+        </form>
       </div>
     </div>
   );
 }
-
-function App() {
-  const [file, setFile] = useState(null);
-  const [preview, setPreview] = useState("");
-  const [result, setResult] = useState(null);
-  const [settings, setSettings] = useState(initialSettings);
-  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [dragging, setDragging] = useState(false);
-  const [previewMode, setPreviewMode] = useState("slider"); // "slider" | "processed" | "original"
-  const [downloading, setDownloading] = useState(false);
-  const inputRef = useRef(null);
-  const loadCounterRef = useRef(0);
-  const activeProcessingIdRef = useRef(0);
-  const abortControllerRef = useRef(null);
-
-  // Sizing mode & Print size calculator state
-  const [sizingMode, setSizingMode] = useState("factor"); // "factor" | "custom" | "print"
-  const [aspectRatioLocked, setAspectRatioLocked] = useState(true);
-  const [printPreset, setPrintPreset] = useState("A4");
-  const [orientation, setOrientation] = useState("portrait");
-  const [customUnit, setCustomUnit] = useState("cm"); // "cm" | "in"
-  const [customWidth, setCustomWidth] = useState("10");
-  const [customHeight, setCustomHeight] = useState("15");
-  const [calculatedPrintPx, setCalculatedPrintPx] = useState(null);
-  const [printCalcError, setPrintCalcError] = useState("");
-
-  const [supportedFormats, setSupportedFormats] = useState([
-    "PNG",
-    "JPEG",
-    "WEBP",
-    "BMP",
-    "TIFF",
-  ]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadConfig() {
-      try {
-        const response = await fetch(`${API}/api/images/config`);
-        if (!response.ok) {
-          throw new Error("Could not load supported formats");
-        }
-
-        const config = await response.json();
-
-        if (!cancelled && Array.isArray(config.supportedFormats)) {
-          setSupportedFormats(config.supportedFormats);
-
-          setSettings((old) => ({
-            ...old,
-            outputFormat: config.supportedFormats.includes(old.outputFormat)
-              ? old.outputFormat
-              : config.supportedFormats[0] || "PNG",
-          }));
-        }
-      } catch (err) {
-        console.error("Format configuration unavailable:", err);
-      }
-    }
-
-    loadConfig();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (preview.startsWith("blob:")) URL.revokeObjectURL(preview);
-      abortControllerRef.current?.abort();
-    };
-  }, [preview]);
-
-  function updateSetting(key, value) {
-    if (busy) return;
-    setSettings((old) => ({ ...old, [key]: value }));
-    setResult(null);
-    setError("");
-  }
-
-  function handleRemoveImage() {
-    activeProcessingIdRef.current++;
-    abortControllerRef.current?.abort();
-    loadCounterRef.current++;
-    setFile(null);
-    setResult(null);
-    setDimensions({ width: 0, height: 0 });
-    setPreview((old) => {
-      if (old.startsWith("blob:")) URL.revokeObjectURL(old);
-      return "";
-    });
-    setError("");
-    if (inputRef.current) inputRef.current.value = "";
-  }
-
-  function handleReplaceImage() {
-    if (busy) return;
-    activeProcessingIdRef.current++;
-    abortControllerRef.current?.abort();
-    if (inputRef.current) {
-      inputRef.current.value = "";
-      inputRef.current.click();
-    }
-  }
-
-  function chooseFile(selected) {
-    if (!selected) return;
-
-    activeProcessingIdRef.current++;
-    abortControllerRef.current?.abort();
-
-    const fileNameLower = (selected.name || "").toLowerCase();
-    const hasValidExt = ALLOWED_EXTENSIONS.some((ext) => fileNameLower.endsWith(ext));
-    const hasValidMime = selected.type && ALLOWED_MIME_TYPES.includes(selected.type.toLowerCase());
-
-    if (!hasValidExt && !hasValidMime) {
-      setError(
-        "Unsupported file format. Please select a PNG, JPEG, WebP, BMP, or TIFF image file."
-      );
-      return;
-    }
-
-    if (selected.size > 52_428_800) {
-      setError(
-        `File size (${(selected.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 50MB maximum upload limit. Please select an image under 50MB.`
-      );
-      return;
-    }
-
-    const currentLoadId = ++loadCounterRef.current;
-    setError("");
-    setResult(null);
-    setPreviewMode("slider");
-    setFile(selected);
-
-    const blobUrl = URL.createObjectURL(selected);
-    setPreview((old) => {
-      if (old.startsWith("blob:")) URL.revokeObjectURL(old);
-      return blobUrl;
-    });
-
-    const image = new Image();
-    image.onload = () => {
-      if (loadCounterRef.current !== currentLoadId) return;
-
-      const origW = image.naturalWidth;
-      const origH = image.naturalHeight;
-
-      if (!origW || !origH || origW < 16 || origH < 16) {
-        setError(
-          `Image dimensions (${origW} × ${origH} px) are smaller than the minimum 16 × 16 pixel requirement.`
-        );
-        return;
-      }
-
-      setDimensions({ width: origW, height: origH });
-
-      if (sizingMode === "factor") {
-        const scale = Number(settings.scaleFactor) || 2;
-        const newW = Math.max(16, Math.round(origW * scale));
-        const newH = Math.max(16, Math.round(origH * scale));
-        setSettings((old) => ({
-          ...old,
-          targetWidth: String(newW),
-          targetHeight: String(newH),
-        }));
-      }
-    };
-
-    image.onerror = () => {
-      if (loadCounterRef.current !== currentLoadId) return;
-      setError(
-        "Failed to decode image. The file may be corrupt or encoded in an unsupported variant."
-      );
-      setFile(null);
-      setPreview((old) => {
-        if (old.startsWith("blob:")) URL.revokeObjectURL(old);
-        return "";
-      });
-      if (inputRef.current) inputRef.current.value = "";
-    };
-
-    image.src = blobUrl;
-  }
-
-  function changeScale(value) {
-    const scale = Number(value);
-    setSizingMode("factor");
-    updateSetting("scaleFactor", value);
-
-    const baseW = dimensions.width > 0 ? dimensions.width : 1240;
-    const baseH = dimensions.height > 0 ? dimensions.height : 1754;
-    // Calculate un-clamped target dimensions to avoid silent clamping
-    const newW = Math.max(16, Math.round(baseW * scale));
-    const newH = Math.max(16, Math.round(baseH * scale));
-
-    setSettings((old) => ({
-      ...old,
-      scaleFactor: value,
-      targetWidth: String(newW),
-      targetHeight: String(newH),
-    }));
-  }
-
-  function handleCustomWidthChange(val) {
-    setSizingMode("custom");
-    setResult(null);
-    setError("");
-
-    if (!aspectRatioLocked) {
-      setSettings((old) => ({ ...old, targetWidth: val }));
-      return;
-    }
-
-    const num = Number(val);
-    const ratio =
-      dimensions.width > 0 && dimensions.height > 0
-        ? dimensions.width / dimensions.height
-        : Number(settings.targetWidth) && Number(settings.targetHeight)
-          ? Number(settings.targetWidth) / Number(settings.targetHeight)
-          : 1;
-
-    if (!isNaN(num) && num > 0) {
-      const computedH = Math.round(num / ratio);
-      setSettings((old) => ({
-        ...old,
-        targetWidth: val,
-        targetHeight: String(computedH),
-      }));
-    } else {
-      setSettings((old) => ({ ...old, targetWidth: val }));
-    }
-  }
-
-  function handleCustomHeightChange(val) {
-    setSizingMode("custom");
-    setResult(null);
-    setError("");
-
-    if (!aspectRatioLocked) {
-      setSettings((old) => ({ ...old, targetHeight: val }));
-      return;
-    }
-
-    const num = Number(val);
-    const ratio =
-      dimensions.width > 0 && dimensions.height > 0
-        ? dimensions.width / dimensions.height
-        : Number(settings.targetWidth) && Number(settings.targetHeight)
-          ? Number(settings.targetWidth) / Number(settings.targetHeight)
-          : 1;
-
-    if (!isNaN(num) && num > 0) {
-      const computedW = Math.round(num * ratio);
-      setSettings((old) => ({
-        ...old,
-        targetHeight: val,
-        targetWidth: String(computedW),
-      }));
-    } else {
-      setSettings((old) => ({ ...old, targetHeight: val }));
-    }
-  }
-
-  function resetToOriginalDimensions() {
-    if (dimensions.width > 0 && dimensions.height > 0) {
-      setSettings((old) => ({
-        ...old,
-        scaleFactor: "1",
-        targetWidth: String(dimensions.width),
-        targetHeight: String(dimensions.height),
-      }));
-      setResult(null);
-      setError("");
-    }
-  }
-
-  // Fetch print size calculations from Spring Boot backend
-  const calculatePrintSizes = useCallback(async () => {
-    if (sizingMode !== "print") return;
-
-    try {
-      setPrintCalcError("");
-      let url = `${API}/api/images/print-sizes?dpi=${settings.dpi}`;
-
-      if (printPreset !== "CUSTOM") {
-        url += `&preset=${printPreset}&orientation=${orientation}`;
-      } else {
-        const wCm = customUnit === "in" ? Number(customWidth) * 2.54 : Number(customWidth);
-        const hCm = customUnit === "in" ? Number(customHeight) * 2.54 : Number(customHeight);
-
-        if (!wCm || !hCm || wCm <= 0 || hCm <= 0 || isNaN(wCm) || isNaN(hCm)) {
-          setPrintCalcError("Enter valid positive numbers for custom width and height.");
-          return;
-        }
-        url += `&widthCm=${wCm}&heightCm=${hCm}`;
-      }
-
-      const response = await fetch(url);
-      if (!response.ok) {
-        const body = await response.json().catch(() => null);
-        throw new Error(body?.error || `Print size calculation failed (HTTP ${response.status})`);
-      }
-
-      const data = await response.json();
-      setCalculatedPrintPx({ width: data.widthPx, height: data.heightPx });
-
-      // Automatically apply to image settings
-      setSettings((old) => ({
-        ...old,
-        targetWidth: String(data.widthPx),
-        targetHeight: String(data.heightPx),
-      }));
-
-      // Check against backend limit of 8192 x 8192 px
-      if (data.widthPx > 8192 || data.heightPx > 8192) {
-        setPrintCalcError(
-          `Output dimensions (${data.widthPx} × ${data.heightPx} px) exceed the backend maximum limit of 8192 × 8192 px. The image processor will reject this. Please reduce DPI or choose a smaller size.`
-        );
-      } else {
-        setPrintCalcError("");
-      }
-    } catch (err) {
-      setPrintCalcError(err.message || "Failed to calculate print dimensions.");
-    }
-  }, [sizingMode, printPreset, orientation, settings.dpi, customUnit, customWidth, customHeight]);
-
-  useEffect(() => {
-    calculatePrintSizes();
-  }, [calculatePrintSizes]);
-
-  const targetWNum = Number(settings.targetWidth);
-  const targetHNum = Number(settings.targetHeight);
-
-  let dimensionWarning = "";
-  if (
-    settings.targetWidth === "" ||
-    settings.targetHeight === "" ||
-    isNaN(targetWNum) ||
-    isNaN(targetHNum)
-  ) {
-    dimensionWarning = "Target width and height must both be valid positive numbers.";
-  } else if (targetWNum < 16 || targetHNum < 16) {
-    dimensionWarning = `Target dimensions (${targetWNum} × ${targetHNum} px) cannot be smaller than the minimum 16 × 16 pixel backend limit.`;
-  } else if (targetWNum > 8192 || targetHNum > 8192) {
-    dimensionWarning = `Target dimensions (${targetWNum} × ${targetHNum} px) exceed the backend maximum limit of 8192 × 8192 pixels. Please adjust dimensions or lower DPI.`;
-  }
-
-  const isInvalidDimensions = Boolean(dimensionWarning);
-  const effectiveOutput = computeEffectiveDimensions(
-    dimensions.width,
-    dimensions.height,
-    settings.targetWidth,
-    settings.targetHeight,
-    settings.maintainAspectRatio
-  );
-
-  async function processImage() {
-    if (!file) {
-      setError("Upload an image first.");
-      return;
-    }
-
-    if (busy) return;
-
-    if (isInvalidDimensions) {
-      setError(dimensionWarning);
-      return;
-    }
-
-    const currentProcId = ++activeProcessingIdRef.current;
-    abortControllerRef.current?.abort();
-
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    // Timeout guard: 90 seconds
-    const timeoutId = setTimeout(() => {
-      controller.abort(new Error("Image processing timed out after 90 seconds. Please try a smaller resolution or scale factor."));
-    }, 90000);
-
-    setBusy(true);
-    setError("");
-    setResult(null);
-
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      form.append(
-        "scaleFactor",
-        settings.model === "ai_pro" ? "4" : settings.scaleFactor
-      );
-      form.append("targetWidth", settings.targetWidth);
-      form.append("targetHeight", settings.targetHeight);
-      form.append("outputFormat", settings.outputFormat);
-      form.append("dpi", settings.dpi);
-      form.append("quality", String(settings.quality));
-      form.append("model", settings.model || "bicubic");
-      form.append("denoiseLevel", "0");
-      form.append("sharpenLevel", "0");
-      form.append(
-        "maintainAspectRatio",
-        String(settings.maintainAspectRatio),
-      );
-
-      const response = await fetch(`${API}/api/images/upscale`, {
-        method: "POST",
-        body: form,
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      // Check if another request or file replacement occurred while in-flight
-      if (activeProcessingIdRef.current !== currentProcId) {
-        return;
-      }
-
-      if (!response.ok) {
-        const errorMsg = await parseApiError(response);
-        throw new Error(errorMsg);
-      }
-
-      const data = await response.json();
-
-      if (activeProcessingIdRef.current !== currentProcId) {
-        return;
-      }
-
-      if (!data || !data.dataUrl) {
-        throw new Error(
-          "The server returned an incomplete response with no preview image data.",
-        );
-      }
-
-      setResult({
-        ...data,
-        dataUrl: data.dataUrl,
-      });
-    } catch (err) {
-      clearTimeout(timeoutId);
-      if (activeProcessingIdRef.current !== currentProcId) {
-        return;
-      }
-      if (err.name === "AbortError") {
-        if (err.message && err.message.includes("timed out")) {
-          setError(err.message);
-        }
-        return;
-      }
-      if (err.name === "TypeError" && (err.message?.toLowerCase().includes("fetch") || err.message?.toLowerCase().includes("network"))) {
-        setError("Could not connect to the backend server. Please verify the Spring Boot service is running on port 8808.");
-      } else {
-        setError(err.message || "An unexpected error occurred during processing.");
-      }
-    } finally {
-      clearTimeout(timeoutId);
-      if (activeProcessingIdRef.current === currentProcId) {
-        setBusy(false);
-      }
-    }
-  }
-
-  async function downloadImage() {
-    if (!result?.dataUrl || downloading) return;
-
-    try {
-      setDownloading(true);
-      const blob = dataUrlToBlob(result.dataUrl);
-      const baseName = sanitizeFilename(file?.name || "upscaled");
-      const ext = getExtensionForFormat(result.outputFormat || settings.outputFormat);
-      const outW = result.targetWidth || settings.targetWidth;
-      const outH = result.targetHeight || settings.targetHeight;
-      const filename = `${baseName}_upscaled_${outW}x${outH}${ext}`;
-
-      const objectUrl = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = objectUrl;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      setTimeout(() => {
-        URL.revokeObjectURL(objectUrl);
-      }, 1500);
-    } catch (err) {
-      console.error("Download failed:", err);
-      setError("Failed to create download file. Please try processing the image again.");
-    } finally {
-      setDownloading(false);
-    }
-  }
-
-  return (
-    <main className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="/">
-          <span className="brand-icon">P</span>
-          <span>
-            PixelPerfect
-            <small>IMAGE RESIZER &amp; PRINT TOOL</small>
-          </span>
-        </a>
-        <div className="free-badge">
-          <span /> FREE · NO AI
-        </div>
-      </header>
-
-      <section className="hero">
-        <div className="eyebrow">
-          <span className="eyebrow-dot" /> DETERMINISTIC IMAGE PROCESSING
-        </div>
-        <h1>
-          Bigger images.
-          <br />
-          <span>Natural quality.</span>
-        </h1>
-        <p>
-          Resize images, calculate precise print dimensions (A4, A3, Letter, custom cm/in),
-          and export in your preferred format. No AI filters or color alteration.
-        </p>
-      </section>
-
-      <div className="workspace">
-        <section className="panel upload-panel">
-          <div className="panel-heading">
-            <div>
-              <span className="step-label">STEP 01</span>
-              <h2>Your image</h2>
-            </div>
-            {file && (
-              <div className="preview-actions">
-                <button
-                  type="button"
-                  className="text-button"
-                  onClick={handleReplaceImage}
-                  disabled={busy}
-                  title="Choose a different image"
-                >
-                  Replace image
-                </button>
-                <button
-                  type="button"
-                  className="text-button text-button-danger"
-                  onClick={handleRemoveImage}
-                  disabled={busy}
-                  title="Clear selected image and results"
-                >
-                  Remove
-                </button>
-              </div>
-            )}
-          </div>
-
-          <input
-            ref={inputRef}
-            type="file"
-            accept="image/*,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff"
-            hidden
-            onChange={(event) => chooseFile(event.target.files?.[0])}
-          />
-
-          {!file ? (
-            <div
-              className={`dropzone ${dragging ? "dragging" : ""}`}
-              onDragOver={(event) => {
-                event.preventDefault();
-                if (!busy) setDragging(true);
-              }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={(event) => {
-                event.preventDefault();
-                setDragging(false);
-                if (!busy) chooseFile(event.dataTransfer.files?.[0]);
-              }}
-              onClick={() => {
-                if (!busy) inputRef.current?.click();
-              }}
-              onKeyDown={(event) => {
-                if (!busy && (event.key === "Enter" || event.key === " ")) {
-                  inputRef.current?.click();
-                }
-              }}
-              role="button"
-              tabIndex={0}
-              aria-label="Upload image area. Click or drag and drop an image file here."
-            >
-              <div className="upload-icon">↑</div>
-              <h3>Drop your image here</h3>
-              <p>or click to browse files on your device</p>
-              <span className="outline-button">Choose image</span>
-              <small>Supported formats: PNG, JPEG, WebP, BMP, TIFF (Max 50MB · Min 16×16 px)</small>
-            </div>
-          ) : (
-            <div className="preview-card">
-              {result && (
-                <div className="preview-mode-bar" role="tablist" aria-label="Preview display modes">
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={previewMode === "slider"}
-                    className={`preview-mode-btn ${previewMode === "slider" ? "active" : ""}`}
-                    onClick={() => setPreviewMode("slider")}
-                  >
-                    ↔ Before / After
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={previewMode === "processed"}
-                    className={`preview-mode-btn ${previewMode === "processed" ? "active" : ""}`}
-                    onClick={() => setPreviewMode("processed")}
-                  >
-                    Processed Output ({result.targetWidth} × {result.targetHeight})
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={previewMode === "original"}
-                    className={`preview-mode-btn ${previewMode === "original" ? "active" : ""}`}
-                    onClick={() => setPreviewMode("original")}
-                  >
-                    Original Input ({dimensions.width} × {dimensions.height})
-                  </button>
-                </div>
-              )}
-
-              {result && previewMode === "slider" ? (
-                <ImageComparisonSlider
-                  originalSrc={preview}
-                  processedSrc={result.dataUrl}
-                  originalDimensions={dimensions}
-                  processedDimensions={{
-                    width: result.targetWidth,
-                    height: result.targetHeight,
-                  }}
-                />
-              ) : result && previewMode === "processed" ? (
-                <div className="preview-image">
-                  <img src={result.dataUrl} alt="Processed output preview" />
-                </div>
-              ) : (
-                <div className="preview-image">
-                  <img src={preview} alt="Original image preview" />
-                </div>
-              )}
-
-              <div className="file-details">
-                <div className="file-name">{file.name}</div>
-                <div className="file-meta">
-                  {file.size >= 1048576
-                    ? `${(file.size / 1048576).toFixed(2)} MB`
-                    : `${(file.size / 1024).toFixed(1)} KB`}
-                  {dimensions.width > 0 && ` · ${dimensions.width} × ${dimensions.height} px`}
-                  {dimensions.width > 0 && ` · Aspect: ${getAspectRatioLabel(dimensions.width, dimensions.height)}`}
-                  {file.type ? ` · ${file.type.replace("image/", "").toUpperCase()}` : ""}
-                  {result && " · Processed"}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {file && (
-            <div className="image-info">
-              <div>
-                <span>Original file</span>
-                <strong>{file.type ? file.type.replace("image/", "").toUpperCase() : (file.name ? file.name.split(".").pop().toUpperCase() : "Unknown")}</strong>
-              </div>
-              <div>
-                <span>Original resolution</span>
-                <strong>{dimensions.width > 0 ? `${dimensions.width} × ${dimensions.height} px` : "Reading..."}</strong>
-              </div>
-              <div>
-                <span>Aspect ratio</span>
-                <strong>{getAspectRatioLabel(dimensions.width, dimensions.height)}</strong>
-              </div>
-              <div>
-                <span>Target resolution</span>
-                <strong>{settings.targetWidth} × {settings.targetHeight} px</strong>
-              </div>
-            </div>
-          )}
-
-          {result && (
-            <div className="result-metrics-card">
-              <div className="result-metrics-heading">
-                <span>✓ Processing Completed Successfully</span>
-                {result.processingDurationMs !== undefined && (
-                  <span>{result.processingDurationMs} ms</span>
-                )}
-              </div>
-              <div className="result-metrics-grid">
-                <div className="result-metric-item">
-                  <span>Input Dimensions</span>
-                  <strong>{dimensions.width} × {dimensions.height} px</strong>
-                </div>
-                <div className="result-metric-item">
-                  <span>Output Dimensions</span>
-                  <strong>{result.targetWidth} × {result.targetHeight} px</strong>
-                </div>
-                <div className="result-metric-item">
-                  <span>Scale Factor</span>
-                  <strong>
-                    {dimensions.width > 0
-                      ? `${(result.targetWidth / dimensions.width).toFixed(2).replace(/\.00$/, "")}×`
-                      : `${settings.scaleFactor}×`}
-                  </strong>
-                </div>
-                <div className="result-metric-item">
-                  <span>Output Format &amp; DPI</span>
-                  <strong>{result.outputFormat || settings.outputFormat} · {result.dpi || settings.dpi} DPI</strong>
-                </div>
-                <div className="result-metric-item result-metric-full">
-                  <span>DPI Metadata Verification</span>
-                  <strong>{getDpiSupportNote(result.outputFormat || settings.outputFormat)}</strong>
-                </div>
-                {result.outputSizeBytes > 0 && (
-                  <div className="result-metric-item">
-                    <span>Output File Size</span>
-                    <strong>
-                      {result.outputSizeBytes >= 1048576
-                        ? `${(result.outputSizeBytes / 1048576).toFixed(2)} MB`
-                        : `${(result.outputSizeBytes / 1024).toFixed(1)} KB`}
-                    </strong>
-                  </div>
-                )}
-                {file.size > 0 && (
-                  <div className="result-metric-item">
-                    <span>Original File Size</span>
-                    <strong>
-                      {file.size >= 1048576
-                        ? `${(file.size / 1048576).toFixed(2)} MB`
-                        : `${(file.size / 1024).toFixed(1)} KB`}
-                    </strong>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </section>
-
-        <section className="panel settings-panel">
-          <div className="panel-heading">
-            <div>
-              <span className="step-label">STEP 02</span>
-              <h2>Output settings</h2>
-            </div>
-          </div>
-
-          {/* Sizing Method Selector (3 Clear Modes) */}
-          <label className="field-label">Sizing method</label>
-          <div className="mode-tabs">
-            <button
-              className={`mode-tab ${sizingMode === "factor" ? "active" : ""}`}
-              onClick={() => {
-                setSizingMode("factor");
-                changeScale(settings.scaleFactor || "2");
-              }}
-              disabled={busy}
-              type="button"
-            >
-              <span>Scale Factor</span>
-            </button>
-            <button
-              className={`mode-tab ${sizingMode === "custom" ? "active" : ""}`}
-              onClick={() => setSizingMode("custom")}
-              disabled={busy}
-              type="button"
-            >
-              <span>Custom Pixels</span>
-            </button>
-            <button
-              className={`mode-tab ${sizingMode === "print" ? "active" : ""}`}
-              onClick={() => setSizingMode("print")}
-              disabled={busy}
-              type="button"
-            >
-              <span>Print Calculator</span>
-            </button>
-          </div>
-
-          {/* Mode 1: Scale Multiplier Options (1x, 2x, 4x, 8x) */}
-          {sizingMode === "factor" && (
-            <>
-              <label className="field-label">Resize multiplier</label>
-              <div className="scale-options">
-                {[
-                  { value: "1", label: "1×", desc: "Original (100%)" },
-                  { value: "2", label: "2×", desc: "Double (200%)" },
-                  { value: "4", label: "4×", desc: "Quadruple (400%)" },
-                  { value: "8", label: "8×", desc: "Max (800%)" },
-                ].map((item) => {
-                  const baseW = dimensions.width;
-                  const baseH = dimensions.height;
-                  const scale = Number(item.value);
-
-                  const predictedW = Math.round(baseW * scale);
-                  const predictedH = Math.round(baseH * scale);
-
-                  const exceedsLimit =
-                    baseW > 0 &&
-                    baseH > 0 &&
-                    (predictedW > 8192 || predictedH > 8192);
-
-                  return (
-                    <button
-                      key={item.value}
-                      type="button"
-                      className={`scale-option ${settings.scaleFactor === item.value ? "selected" : ""}`}
-                      onClick={() => changeScale(item.value)}
-                      disabled={busy}
-                      title={
-                        exceedsLimit
-                          ? `Produces ${predictedW} × ${predictedH} px; maximum is 8192 × 8192 px`
-                          : `${predictedW || "—"} × ${predictedH || "—"} px`
-                      }
-                    >
-                      <strong>{item.label}</strong>
-                      <span>{item.desc}</span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {dimensions.width > 0 &&
-                dimensions.height > 0 &&
-                (Math.round(dimensions.width * Number(settings.scaleFactor)) > 8192 ||
-                  Math.round(dimensions.height * Number(settings.scaleFactor)) > 8192) && (
-                  <p className="field-hint" role="alert">
-                    This scale exceeds the 8192 × 8192 px backend limit.
-                    Choose a smaller multiplier or use Custom Pixels.
-                    Current target: {settings.targetWidth} × {settings.targetHeight} px.
-                  </p>
-                )}
-            </>
-          )}
-
-          {/* Quick Resolution Presets */}
-          {settings.model === "ai_pro" && (
-            <div className="resolution-presets">
-              <label className="field-label">Quick Resolution Presets</label>
-
-              <div className="scale-options">
-                {[
-                  { label: "Full HD", width: 1920, height: 1080 },
-                  { label: "4K UHD", width: 3840, height: 2160 },
-                  { label: "8K UHD", width: 7680, height: 4320 },
-                ].map((preset) => (
-                  <button
-                    key={preset.label}
-                    type="button"
-                    className={`scale-option ${
-                      Number(settings.targetWidth) === preset.width &&
-                      Number(settings.targetHeight) === preset.height
-                        ? "selected"
-                        : ""
-                    }`}
-                    disabled={busy}
-                    onClick={() => {
-                      setSizingMode("custom");
-                      setAspectRatioLocked(false);
-                      setSettings((old) => ({
-                        ...old,
-                        targetWidth: String(preset.width),
-                        targetHeight: String(preset.height),
-                      }));
-                      setResult(null);
-                      setError("");
-                    }}
-                    title={`${preset.width} × ${preset.height} pixels`}
-                  >
-                    <strong>{preset.label}</strong>
-                    <span>{preset.width} × {preset.height}</span>
-                  </button>
-                ))}
-              </div>
-
-              <p className="field-hint">
-                Presets use exact pixel dimensions. The image may be stretched if its
-                original aspect ratio differs from the selected preset.
-              </p>
-            </div>
-          )}
-
-          {/* Mode 2: Custom Dimensions with Aspect Ratio Lock */}
-          {sizingMode === "custom" && (
-            <div className="custom-dim-section">
-              <label className="field-label" style={{ marginBottom: "12px" }}>Custom Pixel Dimensions</label>
-              <div className="custom-dim-grid">
-                <label>
-                  Width (px)
-                  <input
-                    type="number"
-                    min="16"
-                    max="8192"
-                    value={settings.targetWidth}
-                    disabled={busy}
-                    onChange={(e) => handleCustomWidthChange(e.target.value)}
-                  />
-                </label>
-
-                <button
-                  type="button"
-                  className={`aspect-lock-btn ${aspectRatioLocked ? "locked" : "unlocked"}`}
-                  onClick={() => setAspectRatioLocked(!aspectRatioLocked)}
-                  disabled={busy}
-                  aria-pressed={aspectRatioLocked}
-                  aria-label={aspectRatioLocked ? "Aspect ratio locked. Click to unlock." : "Aspect ratio unlocked. Click to lock."}
-                  title={aspectRatioLocked ? "Aspect ratio locked (proportional changes)" : "Aspect ratio unlocked (independent changes)"}
-                >
-                  <span className="lock-icon" aria-hidden="true">{aspectRatioLocked ? "⫘" : "⫙"}</span>
-                  <span className="lock-text">{aspectRatioLocked ? "Linked" : "Independent"}</span>
-                </button>
-
-                <label>
-                  Height (px)
-                  <input
-                    type="number"
-                    min="16"
-                    max="8192"
-                    value={settings.targetHeight}
-                    disabled={busy}
-                    onChange={(e) => handleCustomHeightChange(e.target.value)}
-                  />
-                </label>
-              </div>
-
-              <div className="custom-dim-hints">
-                <span>
-                  {aspectRatioLocked ? "Proportional sizing active" : "Independent width & height editing"}
-                  {dimensions.width > 0 && ` · Aspect: ${getAspectRatioLabel(dimensions.width, dimensions.height)}`}
-                </span>
-                {dimensions.width > 0 && (
-                  <button
-                    type="button"
-                    className="reset-dim-btn"
-                    onClick={resetToOriginalDimensions}
-                    disabled={busy}
-                  >
-                    Reset to 1× ({dimensions.width} × {dimensions.height})
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Mode 3: Print Size Calculator */}
-          {sizingMode === "print" && (
-            <div className="print-section">
-              <div className="field-row">
-                <label>
-                  Print standard preset
-                  <select
-                    value={printPreset}
-                    disabled={busy}
-                    onChange={(e) => setPrintPreset(e.target.value)}
-                  >
-                    <option value="A4">A4 (21.0 × 29.7 cm)</option>
-                    <option value="A3">A3 (29.7 × 42.0 cm)</option>
-                    <option value="A5">A5 (14.8 × 21.0 cm)</option>
-                    <option value="LETTER">Letter (8.5 × 11 in / 21.6 × 27.9 cm)</option>
-                    <option value="LEGAL">Legal (8.5 × 14 in / 21.6 × 35.6 cm)</option>
-                    <option value="CUSTOM">Custom Dimensions (cm / in)</option>
-                  </select>
-                </label>
-
-                {printPreset !== "CUSTOM" && (
-                  <label>
-                    Orientation
-                    <div className="orientation-toggle">
-                      <button
-                        type="button"
-                        className={`orientation-btn ${orientation === "portrait" ? "selected" : ""}`}
-                        onClick={() => setOrientation("portrait")}
-                        disabled={busy}
-                      >
-                        ↕ Portrait
-                      </button>
-                      <button
-                        type="button"
-                        className={`orientation-btn ${orientation === "landscape" ? "selected" : ""}`}
-                        onClick={() => setOrientation("landscape")}
-                        disabled={busy}
-                      >
-                        ↔ Landscape
-                      </button>
-                    </div>
-                  </label>
-                )}
-              </div>
-
-              {printPreset === "CUSTOM" && (
-                <div className="custom-print-box">
-                  <div className="custom-unit-bar">
-                    <span className="field-label" style={{ margin: 0 }}>Custom dimensions:</span>
-                    <div className="unit-toggle">
-                      <button
-                        type="button"
-                        className={`unit-btn ${customUnit === "cm" ? "active" : ""}`}
-                        onClick={() => setCustomUnit("cm")}
-                        disabled={busy}
-                      >
-                        cm
-                      </button>
-                      <button
-                        type="button"
-                        className={`unit-btn ${customUnit === "in" ? "active" : ""}`}
-                        onClick={() => setCustomUnit("in")}
-                        disabled={busy}
-                      >
-                        inches
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="field-row" style={{ marginTop: "10px" }}>
-                    <label>
-                      Width ({customUnit})
-                      <input
-                        type="number"
-                        step="0.1"
-                        min="1"
-                        value={customWidth}
-                        disabled={busy}
-                        onChange={(e) => setCustomWidth(e.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Height ({customUnit})
-                      <input
-                        type="number"
-                        step="0.1"
-                        min="1"
-                        value={customHeight}
-                        disabled={busy}
-                        onChange={(e) => setCustomHeight(e.target.value)}
-                      />
-                    </label>
-                  </div>
-                </div>
-              )}
-
-              {calculatedPrintPx && (
-                <div className="calculated-px-card">
-                  <div>
-                    <div className="calc-label">Calculated Output Pixels ({settings.dpi} DPI)</div>
-                    <div className="calc-preset-name">
-                      {printPreset === "CUSTOM"
-                        ? `Custom ${customWidth} × ${customHeight} ${customUnit}`
-                        : `${PRESET_METADATA[printPreset]?.name || printPreset} · ${orientation === "portrait" ? "Portrait" : "Landscape"} (${orientation === "landscape" ? (PRESET_METADATA[printPreset]?.hMm / 10).toFixed(1) + " × " + (PRESET_METADATA[printPreset]?.wMm / 10).toFixed(1) + " cm" : PRESET_METADATA[printPreset]?.cm || ""})`}
-                    </div>
-                  </div>
-                  <div className="calc-value">
-                    {calculatedPrintPx.width} × {calculatedPrintPx.height} px
-                  </div>
-                </div>
-              )}
-
-              {printCalcError && (
-                <div className="limit-warning">
-                  <span className="warning-icon" aria-hidden="true">!</span>
-                  <div>{printCalcError}</div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Resampling Method */}
-          <div className="field-row">
-            <label>
-              Resampling method
-              <select
-                value={settings.model}
-                disabled={busy}
-                onChange={(event) =>
-                  updateSetting("model", event.target.value)
-                }
-              >
-                <option value="bicubic">Bicubic — Standard</option>
-                <option value="classic_pro">Classic Pro — Lanczos</option>
-                <option value="ai_pro">AI Pro — Real-ESRGAN (4×)</option>
-              </select>
-              <small className="field-hint">
-                Bicubic uses standard image resampling. Classic Pro uses Lanczos
-                resampling. AI Pro uses Real-ESRGAN to reconstruct image details
-                and generate a 4× upscaled image.
-              </small>
-            </label>
-          </div>
-
-          {/* Dimension Fitting Mode (Preserve Aspect vs Exact Dimensions) */}
-          <div className="fit-mode-section">
-            <label className="field-label">Dimension Fitting Mode</label>
-            <div className="fit-mode-options">
-              <button
-                type="button"
-                className={`fit-mode-card ${settings.maintainAspectRatio ? "selected" : ""}`}
-                onClick={() => updateSetting("maintainAspectRatio", true)}
-                disabled={busy}
-                aria-pressed={settings.maintainAspectRatio}
-              >
-                <div className="fit-mode-title">
-                  <span className="fit-mode-indicator">{settings.maintainAspectRatio ? "●" : "○"}</span>
-                  <strong>Fit within target box</strong>
-                </div>
-                <p>
-                  Preserves original aspect ratio without distortion. Output fits inside target dimensions and may be smaller on one edge.
-                </p>
-              </button>
-              <button
-                type="button"
-                className={`fit-mode-card ${!settings.maintainAspectRatio ? "selected" : ""}`}
-                onClick={() => updateSetting("maintainAspectRatio", false)}
-                disabled={busy}
-                aria-pressed={!settings.maintainAspectRatio}
-              >
-                <div className="fit-mode-title">
-                  <span className="fit-mode-indicator">{!settings.maintainAspectRatio ? "●" : "○"}</span>
-                  <strong>Exact requested dimensions</strong>
-                </div>
-                <p>
-                  Produces exact target width &amp; height. If aspect ratio differs from the original, the image will stretch to fill.
-                </p>
-              </button>
-            </div>
-          </div>
-
-          {/* Planned Output Dimension Preview — only show when an image is loaded */}
-          {effectiveOutput && file && dimensions.width > 0 && (
-            <div className="output-summary-card">
-              <div className="output-summary-header">
-                <span className="output-summary-title">Planned Output Resolution</span>
-                <span className="output-summary-badge">
-                  {settings.maintainAspectRatio ? "PROPORTIONAL FIT" : "EXACT SIZE"}
-                </span>
-              </div>
-              <div className="output-summary-grid">
-                <div className="output-summary-item">
-                  <span>Target Box</span>
-                  <strong>{settings.targetWidth} × {settings.targetHeight} px</strong>
-                </div>
-                <div className="output-summary-item">
-                  <span>Final Output</span>
-                  <strong>{effectiveOutput.width} × {effectiveOutput.height} px</strong>
-                </div>
-                <div className="output-summary-item">
-                  <span>Effective Scale</span>
-                  <strong>
-                    {dimensions.width > 0
-                      ? `${(effectiveOutput.width / dimensions.width).toFixed(2).replace(/\.00$/, "")}×`
-                      : `${settings.scaleFactor}×`}
-                  </strong>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {dimensionWarning && (
-            <div className="limit-warning" style={{ marginBottom: "16px" }}>
-              <span className="warning-icon" aria-hidden="true">!</span>
-              <div>{dimensionWarning}</div>
-            </div>
-          )}
-
-          <div className="divider" />
-
-          <div className="field-row">
-            <label>
-              Output format
-              <select
-                value={settings.outputFormat}
-                disabled={busy}
-                onChange={(event) =>
-                  updateSetting("outputFormat", event.target.value)
-                }
-              >
-                {supportedFormats.map((format) => (
-                  <option key={format} value={format}>
-                    {format}
-                  </option>
-                ))}
-              </select>
-              <small className="field-hint">
-                {settings.outputFormat === "PNG" && "Lossless with transparency support. Larger file sizes."}
-                {settings.outputFormat === "JPEG" && "Lossy compression, no transparency. Smallest file sizes."}
-                {settings.outputFormat === "WEBP" && "Modern format, lossy or lossless, with transparency."}
-                {settings.outputFormat === "BMP" && "Uncompressed bitmap. Very large files, no metadata."}
-                {(settings.outputFormat === "TIFF" || settings.outputFormat === "TIF") && "Professional format with full metadata support."}
-              </small>
-            </label>
-            <label>
-              Print DPI
-              <select
-                value={settings.dpi}
-                disabled={busy}
-                onChange={(event) =>
-                  updateSetting("dpi", event.target.value)
-                }
-              >
-                <option value="72">72 DPI · Screen</option>
-                <option value="96">96 DPI · Web</option>
-                <option value="150">150 DPI · Draft Print</option>
-                <option value="300">300 DPI · High Quality Print</option>
-                <option value="600">600 DPI · Ultra Fine</option>
-              </select>
-              <small className="field-hint">
-                DPI sets print-resolution metadata. Higher DPI prints smaller but sharper at the same pixel count.
-              </small>
-            </label>
-          </div>
-
-          {(settings.outputFormat === "JPEG" ||
-            settings.outputFormat === "WEBP") && (
-            <label className="quality-control">
-              <span>
-                Compression quality <strong>{settings.quality}%</strong>
-              </span>
-              <input
-                type="range"
-                min="50"
-                max="100"
-                step="5"
-                value={settings.quality}
-                disabled={busy}
-                onChange={(event) =>
-                  updateSetting("quality", Number(event.target.value))
-                }
-              />
-            </label>
-          )}
-
-          <div className="processing-note">
-            <span className="note-icon" aria-hidden="true">i</span>
-            <p>
-              Uses deterministic bicubic resampling with embedded DPI metadata. Increasing pixel dimensions does not recover detail lost in the original capture. Output is capped at 16–8192 px per side.
-            </p>
-          </div>
-
-          {error && (
-            <div className="error-message" role="alert" aria-live="assertive">
-              <span className="error-icon" aria-hidden="true">✕</span>
-              <div>{error}</div>
-            </div>
-          )}
-
-          <button
-            type="button"
-            className="primary-button"
-            onClick={processImage}
-            disabled={!file || busy || isInvalidDimensions}
-            aria-busy={busy}
-            title={
-              !file
-                ? "Select or upload an image first"
-                : isInvalidDimensions
-                  ? dimensionWarning
-                  : busy
-                    ? "Image processing in progress..."
-                    : "Resize image with current settings"
-            }
-          >
-            {busy ? (
-              <>
-                <span className="spinner" aria-hidden="true" />
-                <span aria-live="polite">Processing image...</span>
-              </>
-            ) : isInvalidDimensions ? (
-              <>Adjust Dimensions to Continue</>
-            ) : (
-              <>Resize image <span aria-hidden="true">→</span></>
-            )}
-          </button>
-
-          {result && (
-            <>
-              <button
-                type="button"
-                className="download-button"
-                onClick={downloadImage}
-                disabled={downloading}
-                aria-busy={downloading}
-                title={downloading ? "Preparing your download..." : `Download ${result.outputFormat} file`}
-              >
-                {downloading ? (
-                  <>
-                    <span className="spinner" aria-hidden="true" /> Preparing download...
-                  </>
-                ) : (
-                  <>↓ Download processed image ({result.outputFormat})</>
-                )}
-              </button>
-              <button
-                type="button"
-                className="secondary-action-button"
-                onClick={handleReplaceImage}
-                disabled={busy}
-              >
-                Process another image
-              </button>
-            </>
-          )}
-        </section>
-      </div>
-
-      <footer className="footer">
-        <span>PIXEL PERFECT</span>
-        <span>Free image processing · No AI enhancement · Max 8192 × 8192 px</span>
-      </footer>
-    </main>
-  );
-}
-
-export default App;
