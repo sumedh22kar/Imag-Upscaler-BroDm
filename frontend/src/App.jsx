@@ -13,6 +13,7 @@ import {
   extensionFor,
   fitWithin,
   formatBytes,
+  formatOutputFilename,
   getPaperMm,
   isCropNeeded,
   maxDpiForPaper,
@@ -472,8 +473,18 @@ export default function App() {
     const { data } = activeResult;
     try {
       const blob = dataUrlToBlob(data.dataUrl);
-      const sheet = mode === "paper" ? `-${paper.preset === "CUSTOM" ? "custom" : PAPERS[paper.preset].label.replace("×", "x").replace(" in", "in")}` : "";
-      const name = `${safeBaseName(file.name)}${sheet}-${data.targetWidth}x${data.targetHeight}-${data.dpi}dpi${extensionFor(data.outputFormat)}`;
+      const name = formatOutputFilename({
+        originalName: file.name,
+        mode,
+        scale,
+        paperPreset: paper.preset,
+        paperLabel: paper.preset === "CUSTOM" ? "custom" : PAPERS[paper.preset]?.label,
+        targetWidth: data.targetWidth,
+        targetHeight: data.targetHeight,
+        dpi: data.dpi,
+        model,
+        outputFormat: data.outputFormat,
+      });
       const href = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = href;
@@ -535,8 +546,8 @@ export default function App() {
         </a>
         <div className={`server is-${server}`} role="status">
           <span className="server-dot" aria-hidden="true" />
-          {server === "up" && "Server ready"}
-          {server === "checking" && "Checking server"}
+          {server === "up" && <span className="sr-only">Server ready</span>}
+          {server === "checking" && <span className="sr-only">Checking server</span>}
           {server === "down" && (
             <>
               Server offline
@@ -608,8 +619,10 @@ export default function App() {
               beforeSrc={previewUrl}
               afterSrc={activeResult.data.dataUrl}
               ratio={activeResult.data.targetWidth / activeResult.data.targetHeight}
-              beforeLabel={`Original ${src.w} × ${src.h}`}
-              afterLabel={`Upscaled ${activeResult.data.targetWidth} × ${activeResult.data.targetHeight}`}
+              beforeLabel="Original"
+              beforeDims={`${src.w} × ${src.h}`}
+              afterLabel="Upscaled"
+              afterDims={`${activeResult.data.targetWidth} × ${activeResult.data.targetHeight}`}
               beforeStyle={effFit === "fill" ? { objectPosition: `${focus.x * 100}% ${focus.y * 100}%` } : undefined}
             />
           ) : (

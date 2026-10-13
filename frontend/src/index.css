@@ -29,10 +29,20 @@ body {
   min-height: 100dvh;
   background: var(--ink);
   color: var(--text);
-  font-size: 15px;
+  font-size: 14.5px;
   line-height: 1.45;
+}
+
+.tabular,
+.facts dd,
+.dim,
+.compare-tag-dim,
+.meter-text small,
+input[type="number"],
+.seg-item small {
   font-variant-numeric: tabular-nums;
 }
+
 
 button,
 input,

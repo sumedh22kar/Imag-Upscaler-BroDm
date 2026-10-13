@@ -1,5 +1,6 @@
 package com.upscaler.service;
 
+import com.upscaler.dto.ByteArrayMultipartFile;
 import com.upscaler.dto.ImageUploadResponse;
 import com.upscaler.dto.UpscaleSettingsRequest;
 import com.upscaler.exception.ConcurrentProcessingLimitExceededException;
@@ -163,16 +164,16 @@ public class ImageProcessingService {
 
                     // Calculate target dimensions before allocating image buffers.
                     Dimension targetDim;
-                    int aiScale = 4;
-
                     boolean useAiPro =
                             "ai_pro".equalsIgnoreCase(settings.getModel());
 
                     if (useAiPro) {
-                        aiScale = selectAiScale(origWidth, origHeight);
-
-                        long aiWidth = (long) origWidth * aiScale;
-                        long aiHeight = (long) origHeight * aiScale;
+                        int longestSide = Math.max(origWidth, origHeight);
+                        if (longestSide > 4096) {
+                            throw new InvalidImageException(
+                                    "AI Pro currently supports images up to 4096 pixels on the longest side."
+                            );
+                        }
 
                         boolean hasCustomTarget =
                                 settings.getTargetWidth() != null
@@ -183,7 +184,9 @@ public class ImageProcessingService {
                                     origWidth, origHeight, settings
                             );
                         } else {
-                            targetDim = new Dimension((int) aiWidth, (int) aiHeight);
+                            long defaultW = Math.min((long) origWidth * 4, (long) maxWidthLimit);
+                            long defaultH = Math.min((long) origHeight * 4, (long) maxHeightLimit);
+                            targetDim = new Dimension((int) defaultW, (int) defaultH);
                         }
                     } else {
                         targetDim = calculateTargetDimensions(
@@ -204,7 +207,6 @@ public class ImageProcessingService {
                                 origHeight,
                                 targetDim.width,
                                 targetDim.height,
-                                aiScale,
                                 startTime
                         );
                     }
@@ -398,24 +400,6 @@ public class ImageProcessingService {
         }
     }
 
-    private int selectAiScale(int originalWidth, int originalHeight) {
-        int longestSide = Math.max(originalWidth, originalHeight);
-
-        if (longestSide <= 2048) {
-            return 4;
-        }
-        if (longestSide <= 2730) {
-            return 3;
-        }
-        if (longestSide <= 4096) {
-            return 2;
-        }
-
-        throw new InvalidImageException(
-                "AI Pro currently supports images up to 4096 pixels on the longest side."
-        );
-    }
-
     private ProcessedImageResult processAiProImage(
             MultipartFile file,
             UpscaleSettingsRequest settings,
@@ -423,11 +407,54 @@ public class ImageProcessingService {
             int origHeight,
             int targetWidth,
             int targetHeight,
-            int aiScale,
             long startTime
     ) {
+        MultipartFile effectiveFile = file;
+        int effectiveWidth = origWidth;
+        int effectiveHeight = origHeight;
+
+        // Note: Real-ESRGAN's realesrgan-x4plus model is strictly a 4x super-resolution network.
+        // If the input image's longest dimension exceeds 2048, 4x super-resolution would exceed 8192px.
+        // We pre-scale the image with high-precision Lanczos so its longest side is exactly 2048px,
+        // preserving maximum source detail while keeping inference strictly within GPU bounds and
+        // ensuring NCNN tile offsets remain perfectly synchronized with native 4x scaling.
+        int longestSide = Math.max(origWidth, origHeight);
+        if (longestSide > 2048) {
+            double preScaleFactor = 2048.0 / longestSide;
+            int preW = (int) Math.round(origWidth * preScaleFactor);
+            int preH = (int) Math.round(origHeight * preScaleFactor);
+
+            try (InputStream is = file.getInputStream()) {
+                BufferedImage inputImage = ImageIO.read(is);
+                if (inputImage == null) {
+                    throw new InvalidImageException("Failed to decode image stream for AI processing.");
+                }
+
+                BufferedImage preScaled = LanczosResampler.resize(inputImage, preW, preH);
+                inputImage.flush();
+
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                if (!ImageIO.write(preScaled, "png", baos)) {
+                    preScaled.flush();
+                    throw new InvalidImageException("Failed to encode pre-scaled image buffer.");
+                }
+                preScaled.flush();
+
+                byte[] preScaledBytes = baos.toByteArray();
+                effectiveFile = new ByteArrayMultipartFile(
+                        file.getOriginalFilename() != null ? file.getOriginalFilename() : "input.png",
+                        "image/png",
+                        preScaledBytes
+                );
+                effectiveWidth = preW;
+                effectiveHeight = preH;
+            } catch (IOException e) {
+                throw new InvalidImageException("Failed to prepare image for AI upscaling: " + e.getMessage(), e);
+            }
+        }
+
         byte[] aiPngBytes = realEsrganService.upscale(
-                file, origWidth, origHeight, aiScale
+                effectiveFile, effectiveWidth, effectiveHeight, 4
         );
 
         BufferedImage aiImage = null;
@@ -507,6 +534,11 @@ public class ImageProcessingService {
             String dataUrl = "data:" + mimeType + ";base64,"
                     + Base64.getEncoder().encodeToString(outputBytes);
 
+            int reportedScale = settings.getScaleFactor() != null && settings.getScaleFactor() >= 1
+                    ? settings.getScaleFactor()
+                    : (int) Math.round((double) targetWidth / origWidth);
+            if (reportedScale < 1) reportedScale = 1;
+
             ImageUploadResponse response = new ImageUploadResponse();
             response.setOriginalFilename(file.getOriginalFilename());
             response.setContentType(file.getContentType());
@@ -515,7 +547,7 @@ public class ImageProcessingService {
             response.setOriginalHeight(origHeight);
             response.setTargetWidth(targetWidth);
             response.setTargetHeight(targetHeight);
-            response.setScaleFactor(4);
+            response.setScaleFactor(reportedScale);
             response.setOutputFormat(targetFormat);
             response.setDpi(targetDpi);
             response.setOutputSizeBytes(outputBytes.length);

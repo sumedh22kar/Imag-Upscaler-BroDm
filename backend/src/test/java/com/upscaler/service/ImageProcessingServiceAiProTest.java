@@ -142,9 +142,9 @@ class ImageProcessingServiceAiProTest {
     }
 
     @Test
-    void selectsThreeXWhenLongestSideIs2049() throws Exception {
+    void prescalesAndRunsNativeFourXWhenLongestSideIs2049() throws Exception {
         when(realEsrganService.upscale(any(), anyInt(), anyInt(), anyInt()))
-                .thenReturn(createPng(6147, 6));
+                .thenReturn(createPng(8192, 8));
 
         ImageProcessingService.ProcessedImageResult result =
                 imageProcessingService.processImage(
@@ -152,16 +152,16 @@ class ImageProcessingServiceAiProTest {
                         defaultAiProSettings()
                 );
 
-        assertEquals(6147, result.response().getTargetWidth());
-        assertEquals(6, result.response().getTargetHeight());
+        assertEquals(8192, result.response().getTargetWidth());
+        assertEquals(8, result.response().getTargetHeight());
 
-        verify(realEsrganService).upscale(any(), eq(2049), eq(2), eq(3));
+        verify(realEsrganService).upscale(any(), eq(2048), eq(2), eq(4));
     }
 
     @Test
-    void selectsTwoXWhenLongestSideIs2731() throws Exception {
+    void prescalesAndRunsNativeFourXWhenLongestSideIs2731() throws Exception {
         when(realEsrganService.upscale(any(), anyInt(), anyInt(), anyInt()))
-                .thenReturn(createPng(5462, 4));
+                .thenReturn(createPng(8192, 8));
 
         ImageProcessingService.ProcessedImageResult result =
                 imageProcessingService.processImage(
@@ -169,27 +169,27 @@ class ImageProcessingServiceAiProTest {
                         defaultAiProSettings()
                 );
 
-        assertEquals(5462, result.response().getTargetWidth());
-        assertEquals(4, result.response().getTargetHeight());
+        assertEquals(8192, result.response().getTargetWidth());
+        assertEquals(8, result.response().getTargetHeight());
 
-        verify(realEsrganService).upscale(any(), eq(2731), eq(2), eq(2));
+        verify(realEsrganService).upscale(any(), eq(2048), eq(1), eq(4));
     }
 
     @Test
     void supportsInputWithLongestSideOf4096() throws Exception {
         when(realEsrganService.upscale(any(), anyInt(), anyInt(), anyInt()))
-                .thenReturn(createPng(8192, 2));
+                .thenReturn(createPng(8192, 8));
 
         ImageProcessingService.ProcessedImageResult result =
                 imageProcessingService.processImage(
-                        createInput(4096, 1),
+                        createInput(4096, 2),
                         defaultAiProSettings()
                 );
 
         assertEquals(8192, result.response().getTargetWidth());
-        assertEquals(2, result.response().getTargetHeight());
+        assertEquals(8, result.response().getTargetHeight());
 
-        verify(realEsrganService).upscale(any(), eq(4096), eq(1), eq(2));
+        verify(realEsrganService).upscale(any(), eq(2048), eq(1), eq(4));
     }
 
     @Test

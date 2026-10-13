@@ -4,6 +4,7 @@ import {
   computeCrop,
   fitWithin,
   formatBytes,
+  formatOutputFilename,
   getPaperMm,
   maxDpiForPaper,
   mmToPx,
@@ -101,5 +102,73 @@ describe("labels", () => {
   it("makes safe file names", () => {
     expect(safeBaseName("my:photo?.jpg")).toBe("my_photo_");
     expect(safeBaseName("")).toBe("image");
+  });
+
+  it("formats descriptive output file names without double dashes or weird symbols", () => {
+    // Paper mode
+    expect(
+      formatOutputFilename({
+        originalName: "photo.png",
+        mode: "paper",
+        paperPreset: "A4",
+        targetWidth: 3508,
+        targetHeight: 2480,
+        dpi: 300,
+        model: "bicubic",
+        outputFormat: "PNG",
+      })
+    ).toBe("photo-A4-3508x2480-300dpi.png");
+
+    expect(
+      formatOutputFilename({
+        originalName: "art.jpg",
+        mode: "paper",
+        paperPreset: "4x6",
+        targetWidth: 1800,
+        targetHeight: 1200,
+        dpi: 300,
+        model: "ai_pro",
+        outputFormat: "WEBP",
+      })
+    ).toBe("art-4x6in-1800x1200-300dpi-ai.webp");
+
+    // Scale mode
+    expect(
+      formatOutputFilename({
+        originalName: "portrait.png",
+        mode: "scale",
+        scale: 2,
+        targetWidth: 3072,
+        targetHeight: 5504,
+        dpi: 300,
+        model: "ai_pro",
+        outputFormat: "PNG",
+      })
+    ).toBe("portrait-2x-3072x5504-ai.png");
+
+    expect(
+      formatOutputFilename({
+        originalName: "landscape.png",
+        mode: "scale",
+        scale: 4,
+        targetWidth: 6144,
+        targetHeight: 4096,
+        model: "classic_pro",
+        outputFormat: "PNG",
+      })
+    ).toBe("landscape-4x-6144x4096.png");
+
+    // Pixels mode
+    expect(
+      formatOutputFilename({
+        originalName: "banner.png",
+        mode: "pixels",
+        targetWidth: 3840,
+        targetHeight: 2160,
+        dpi: 300,
+        model: "bicubic",
+        outputFormat: "JPEG",
+      })
+    ).toBe("banner-3840x2160-300dpi.jpg");
   });
 });

@@ -44,15 +44,17 @@ public class RealEsrganService {
     public byte[] upscale(
             MultipartFile file,
             int originalWidth,
+            int originalHeight
+    ) {
+        return upscale(file, originalWidth, originalHeight, 4);
+    }
+
+    public byte[] upscale(
+            MultipartFile file,
+            int originalWidth,
             int originalHeight,
             int scale
     ) {
-        if (scale != 2 && scale != 3 && scale != 4) {
-            throw new InvalidImageException(
-                    "AI scale must be 2, 3, or 4."
-            );
-        }
-
         if (!enabled) {
             throw new InvalidImageException(
                     "AI Pro is not enabled on this server."
@@ -86,12 +88,16 @@ public class RealEsrganService {
 
             file.transferTo(inputPath);
 
+            // Note: realesrgan-x4plus is strictly a 4x neural network model.
+            // When tiling (-t) is enabled, passing -s 2 or -s 3 causes NCNN tile offset
+            // desynchronization, scrambling the output into checkerboard jigsaw tiles.
+            // We always run the inference at native 4x (-s 4) to ensure seamless stitching.
             ProcessBuilder builder = new ProcessBuilder(
                     executablePath.toString(),
                     "-i", inputPath.toString(),
                     "-o", outputPath.toString(),
                     "-n", "realesrgan-x4plus",
-                    "-s", Integer.toString(scale),
+                    "-s", "4",
                     "-m", modelsPath.toString(),
                     "-g", Integer.toString(gpuId),
                     "-t", Integer.toString(tileSize),
@@ -142,8 +148,7 @@ public class RealEsrganService {
             validateOutputImage(
                     outputPath,
                     originalWidth,
-                    originalHeight,
-                    scale
+                    originalHeight
             );
 
             return Files.readAllBytes(outputPath);
@@ -215,8 +220,7 @@ public class RealEsrganService {
     private void validateOutputImage(
             Path outputPath,
             int originalWidth,
-            int originalHeight,
-            int scale
+            int originalHeight
     ) throws IOException {
         try (ImageInputStream input =
                      ImageIO.createImageInputStream(outputPath.toFile())) {
@@ -243,12 +247,12 @@ public class RealEsrganService {
                 int width = reader.getWidth(0);
                 int height = reader.getHeight(0);
 
-                long expectedWidth = (long) originalWidth * scale;
-                long expectedHeight = (long) originalHeight * scale;
+                long expectedWidth = (long) originalWidth * 4;
+                long expectedHeight = (long) originalHeight * 4;
 
                 if (expectedWidth > 8192 || expectedHeight > 8192) {
                     throw new InvalidImageException(
-                            "The AI output would exceed the 8192-pixel limit."
+                            "The 4× AI output would exceed the 8192-pixel limit."
                     );
                 }
 

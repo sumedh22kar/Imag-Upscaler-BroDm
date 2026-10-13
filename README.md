@@ -11,6 +11,22 @@
 
 ---
 
+## 📸 Interface Preview
+
+<div align="center">
+  <img src="docs/screenshots/comparison.png" alt="Before and After Upscaling Comparison" width="88%" />
+  <p><em>Interactive before-and-after slider with live resolution badges, print density meter, and instant download</em></p>
+</div>
+
+<br/>
+
+<div align="center">
+  <img src="docs/screenshots/workspace.png" alt="PixelPerfect Print Preparation Workspace" width="88%" />
+  <p><em>Interactive print sheet canvas with ISO / US paper presets, target DPI configuration, and lightweight controls</em></p>
+</div>
+
+---
+
 ## 🌟 Key Capabilities
 
 ### 🧠 1. Multi-Tier Upscaling Engines
@@ -77,7 +93,7 @@ graph TD
 | **Backend** | Java 21, Spring Boot 3.5 | Virtual-thread friendly, Tomcat bounded thread pool |
 | **AI Inference** | Real-ESRGAN NCNN Vulkan | Hardware-accelerated Vulkan binary (`realesrgan-x4plus`) |
 | **Image I/O** | TwelveMonkeys ImageIO, Sejda WebP | Lossless PNG, JPEG, WebP, BMP, and TIFF support |
-| **Testing** | JUnit 5, Mockito, Vitest, Testing Library | 78 backend tests + 57 frontend tests |
+| **Testing** | JUnit 5, Mockito, Vitest, Testing Library | 78 backend tests + 41 frontend tests |
 
 ---
 
@@ -195,7 +211,7 @@ mvn clean test
 ```
 *Validates Lanczos resampling math, boundary conditions, concurrency semaphores, format codecs, and mocked AI Pro pipelines.*
 
-### Frontend Vitest Suite (57 tests)
+### Frontend Vitest Suite (41 tests)
 ```bash
 cd frontend
 npm test -- --run

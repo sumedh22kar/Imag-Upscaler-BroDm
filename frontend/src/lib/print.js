@@ -162,3 +162,48 @@ export function safeBaseName(name) {
     .slice(0, 80);
   return base || "image";
 }
+
+/**
+ * Formats a clean, readable and descriptive output filename for downloaded results.
+ * E.g.:
+ * - Scale: "photo-2x-3072x5504-ai.png" or "photo-2x-3072x5504.png"
+ * - Paper: "photo-A4-3508x2480-300dpi.png" or "photo-4x6in-1800x1200-300dpi-ai.png"
+ * - Pixels: "photo-3840x2160-300dpi.png"
+ */
+export function formatOutputFilename({
+  originalName,
+  mode = "paper",
+  scale = 2,
+  paperPreset = "A4",
+  paperLabel,
+  targetWidth,
+  targetHeight,
+  dpi = 300,
+  model = "bicubic",
+  outputFormat = "PNG",
+}) {
+  const base = safeBaseName(originalName);
+  const ext = extensionFor(outputFormat);
+  const aiTag = model === "ai_pro" ? "-ai" : "";
+
+  if (mode === "scale") {
+    const dims = targetWidth && targetHeight ? `-${targetWidth}x${targetHeight}` : "";
+    return `${base}-${scale}x${dims}${aiTag}${ext}`;
+  }
+
+  if (mode === "paper") {
+    let sheetTag = "custom";
+    if (paperPreset !== "CUSTOM") {
+      const p = PAPERS[paperPreset];
+      sheetTag = p ? p.label.replace("×", "x").replace(" in", "in") : paperPreset;
+    } else if (paperLabel) {
+      sheetTag = paperLabel;
+    }
+    const dims = targetWidth && targetHeight ? `-${targetWidth}x${targetHeight}` : "";
+    return `${base}-${sheetTag}${dims}-${dpi}dpi${aiTag}${ext}`;
+  }
+
+  // mode === "pixels" or fallback
+  const dims = targetWidth && targetHeight ? `-${targetWidth}x${targetHeight}` : "-upscaled";
+  return `${base}${dims}-${dpi}dpi${aiTag}${ext}`;
+}
